@@ -1,11 +1,12 @@
 #pragma once
 // ============================================================
 //  html.h — BurstCast web UI
-//  NOTE: config.h must be included before this file.
-//        cfg extern is declared there.
+//  NOTE: config.h is included first in BurstCast.ino — do NOT
+//        re-include it here or the Arduino build system will
+//        redefine struct Config and blow up.
 // ============================================================
 
-#include "config.h"
+// Config struct and extern cfg come from config.h via BurstCast.ino
 
 static const char* const FRAME_SIZE_LABELS[] = {
   "QQVGA (160x120)",   // 0
