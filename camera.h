@@ -58,19 +58,15 @@ static bool jpegSOFDims(const uint8_t* buf, size_t len, uint16_t* w, uint16_t* h
 }
 
 inline bool cameraInit() {
+  // ── STAGE 0: what did we load from NVS? ──────────────────────────────────
+  Serial.printf("[CAM-DBG] cfg.frameSize=%u (expect 7=VGA 640x480)\n", cfg.frameSize);
+  Serial.printf("[CAM-DBG] cfg.xclkMhz=%u cfg.jpegQuality=%u\n",
+    cfg.xclkMhz, cfg.jpegQuality);
+
   if (!psramFound())
     Serial.println("[Camera] PSRAM not found!");
   else
     Serial.printf("[Camera] PSRAM free: %u KB\n", ESP.getFreePsram() / 1024);
-
-  // Init directly at the user-configured frame size.
-  // Using GRAB_WHEN_EMPTY during init ensures the sensor is idle when the
-  // PLL and windowing registers are written, so set_framesize() takes effect
-  // reliably. After warmup we switch to GRAB_LATEST for low-latency capture.
-  // fb_count=1 during init avoids a stale second buffer interfering with the
-  // mode switch (matches the reference CameraWebServer pattern).
-  Serial.printf("[Camera] Init frameSize=%u xclk=%uMHz\n",
-    cfg.frameSize, cfg.xclkMhz);
 
   camera_config_t cam = {};
   cam.ledc_channel = LEDC_CHANNEL_0;
@@ -83,17 +79,21 @@ inline bool cameraInit() {
   cam.pin_pclk     = CAM_PIN_PCLK;
   cam.pin_vsync    = CAM_PIN_VSYNC;
   cam.pin_href     = CAM_PIN_HREF;
-  cam.pin_sccb_sda = CAM_PIN_SIOD;
   cam.pin_sccb_scl = CAM_PIN_SIOC;
+  cam.pin_sccb_sda = CAM_PIN_SIOD;
   cam.pin_pwdn     = CAM_PIN_PWDN;
   cam.pin_reset    = CAM_PIN_RESET;
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
-  cam.frame_size   = (framesize_t)cfg.frameSize;  // init at target size directly
+  cam.frame_size   = (framesize_t)cfg.frameSize;
   cam.jpeg_quality = cfg.jpegQuality;
-  cam.fb_count     = 1;                           // always 1 during init
-  cam.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;      // idle sensor during mode config
+  cam.fb_count     = 1;
+  cam.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+
+  // ── STAGE 1: what are we passing to esp_camera_init? ─────────────────────
+  Serial.printf("[CAM-DBG] Calling esp_camera_init: frame_size=%u grab=WHEN_EMPTY fb_count=1\n",
+    (uint8_t)cam.frame_size);
 
   esp_err_t err = esp_camera_init(&cam);
   if (err != ESP_OK) {
@@ -106,32 +106,69 @@ inline bool cameraInit() {
     Serial.println("[Camera] sensor_get FAILED");
     return false;
   }
-  Serial.printf("[Camera] Sensor PID: 0x%x\n", s->id.PID);
+
+  // ── STAGE 2: what does the sensor report immediately after init? ──────────
+  Serial.printf("[CAM-DBG] Sensor PID=0x%x status.framesize=%u\n",
+    s->id.PID, s->status.framesize);
+
   s->set_vflip(s, 1);
   s->set_hmirror(s, 0);
 
-  // Warmup: let AE/AWB stabilize and confirm final output size.
-  // On the last frame, parse the JPEG SOF marker to verify actual dimensions.
+  // ── STAGE 3: grab first raw frame — check fb fields AND SOF ──────────────
+  {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb) {
+      uint16_t sw = 0, sh = 0;
+      bool sofOk = jpegSOFDims(fb->buf, fb->len, &sw, &sh);
+      Serial.printf("[CAM-DBG] First frame: fb->width=%u fb->height=%u len=%u\n",
+        fb->width, fb->height, fb->len);
+      Serial.printf("[CAM-DBG] First frame: SOF parse ok=%d SOF_w=%u SOF_h=%u\n",
+        sofOk, sw, sh);
+      // Log first 16 bytes so we can verify it's a valid JPEG
+      Serial.print("[CAM-DBG] First frame header bytes:");
+      for (int i = 0; i < 16 && i < (int)fb->len; i++)
+        Serial.printf(" %02X", fb->buf[i]);
+      Serial.println();
+      esp_camera_fb_return(fb);
+    } else {
+      Serial.println("[CAM-DBG] First frame grab FAILED");
+    }
+  }
+
+  // ── STAGE 4: warmup + confirm final dims on last frame ───────────────────
   Serial.print("[Camera] Warming up");
   for (int i = 0; i < 10; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
       if (i == 9) {
         uint16_t w = 0, h = 0;
-        if (jpegSOFDims(fb->buf, fb->len, &w, &h) && w > 0 && h > 0) {
+        bool sofOk = jpegSOFDims(fb->buf, fb->len, &w, &h);
+        Serial.printf("\n[CAM-DBG] Warmup final frame: fb->width=%u fb->height=%u len=%u\n",
+          fb->width, fb->height, fb->len);
+        Serial.printf("[CAM-DBG] Warmup final SOF: ok=%d w=%u h=%u\n", sofOk, w, h);
+        // ── STAGE 5: what does sensor status say NOW? ─────────────────────
+        sensor_t* s2 = esp_camera_sensor_get();
+        if (s2) Serial.printf("[CAM-DBG] Sensor status.framesize after warmup=%u\n",
+          s2->status.framesize);
+        if (sofOk && w > 0 && h > 0) {
           camWidth  = w;
           camHeight = h;
+        } else {
+          // Fall back to fb struct dims if SOF parse failed
+          camWidth  = fb->width;
+          camHeight = fb->height;
         }
-        Serial.printf(" done. %ux%u (%u bytes)\n", camWidth, camHeight, fb->len);
+      } else {
+        Serial.print(".");
       }
       esp_camera_fb_return(fb);
     }
     delay(80);
   }
 
-  // Switch to GRAB_LATEST + 2 frame buffers (if PSRAM available) for
-  // low-latency burst capture now that init is stable.
+  // Switch to GRAB_LATEST + fb_count=2 for burst performance
   if (psramFound()) {
+    Serial.println("\n[CAM-DBG] Re-init: GRAB_LATEST fb_count=2");
     esp_camera_deinit();
     cam.fb_count  = 2;
     cam.grab_mode = CAMERA_GRAB_LATEST;
@@ -140,16 +177,28 @@ inline bool cameraInit() {
       Serial.printf("[Camera] Re-init GRAB_LATEST FAILED: 0x%x\n", err);
       return false;
     }
-    // Re-apply sensor settings lost on deinit
     s = esp_camera_sensor_get();
     if (s) {
       s->set_vflip(s, 1);
       s->set_hmirror(s, 0);
+      // ── STAGE 6: sensor status after re-init ─────────────────────────────
+      Serial.printf("[CAM-DBG] After re-init: sensor status.framesize=%u\n",
+        s->status.framesize);
+    }
+    // ── STAGE 7: first frame after re-init ───────────────────────────────
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb) {
+      uint16_t sw = 0, sh = 0;
+      bool sofOk = jpegSOFDims(fb->buf, fb->len, &sw, &sh);
+      Serial.printf("[CAM-DBG] Post-reinit frame: fb->width=%u fb->height=%u\n",
+        fb->width, fb->height);
+      Serial.printf("[CAM-DBG] Post-reinit SOF: ok=%d w=%u h=%u\n", sofOk, sw, sh);
+      esp_camera_fb_return(fb);
     }
     Serial.println("[Camera] Switched to GRAB_LATEST fb_count=2");
   }
 
-  Serial.printf("[Camera] OK — %dMHz PSRAM=%s actual=%ux%u\n",
+  Serial.printf("[Camera] OK — %uMHz PSRAM=%s camWidth=%u camHeight=%u\n",
     cfg.xclkMhz, psramFound() ? "yes" : "NO", camWidth, camHeight);
   camReady = true;
   return true;
