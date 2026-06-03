@@ -32,13 +32,9 @@ static std::vector<FrameEntry> frameBuffer;
 static volatile uint16_t       playbackIdx = 0;
 static volatile bool           camReady    = false;
 
-// Actual pixel dimensions read from the first good JPEG frame after warmup.
-// Set by cameraInit(); used by rtspBegin() to match the SDP to reality.
 uint16_t camWidth  = 640;
 uint16_t camHeight = 480;
 
-// Parse width/height out of a JPEG SOF0/SOF2 marker.
-// Returns true and fills w/h if found.
 static bool jpegSOFDims(const uint8_t* buf, size_t len, uint16_t* w, uint16_t* h) {
   const uint8_t* p   = buf + 2;
   const uint8_t* end = buf + len;
@@ -61,22 +57,21 @@ static bool jpegSOFDims(const uint8_t* buf, size_t len, uint16_t* w, uint16_t* h
   return false;
 }
 
-inline void debugJpegFrame(const uint8_t* buf, size_t len, const char* tag) {
-  Serial.printf("[JPEG/%s] len=%u first4: %02X %02X %02X %02X\n",
-    tag, (unsigned)len,
-    len>0?buf[0]:0, len>1?buf[1]:0, len>2?buf[2]:0, len>3?buf[3]:0);
-  uint16_t w=0, h=0;
-  if (jpegSOFDims(buf, len, &w, &h))
-    Serial.printf("[JPEG/%s] SOF: %ux%u\n", tag, w, h);
-  else
-    Serial.printf("[JPEG/%s] WARNING: SOF not found\n", tag);
-}
-
 inline bool cameraInit() {
   if (!psramFound())
     Serial.println("[Camera] PSRAM not found!");
   else
     Serial.printf("[Camera] PSRAM free: %u KB\n", ESP.getFreePsram() / 1024);
+
+  framesize_t targetSize = (framesize_t)cfg.frameSize;
+
+  // For large frames (HD and above) use a single frame buffer to avoid
+  // exhausting PSRAM. Double-buffering is only beneficial at smaller sizes
+  // where the DMA transfer is fast enough to keep up.
+  bool largeFrame = (cfg.frameSize >= 10);  // FRAMESIZE_HD = index 10
+  uint8_t fbCount = (!psramFound() || largeFrame) ? 1 : 2;
+
+  Serial.printf("[Camera] Target frameSize=%u fbCount=%u\n", cfg.frameSize, fbCount);
 
   camera_config_t cam = {};
   cam.ledc_channel = LEDC_CHANNEL_0;
@@ -95,9 +90,9 @@ inline bool cameraInit() {
   cam.pin_reset    = CAM_PIN_RESET;
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
-  cam.frame_size   = FRAMESIZE_QVGA;
+  cam.frame_size   = targetSize;   // allocate DMA for the actual target size
   cam.jpeg_quality = cfg.jpegQuality;
-  cam.fb_count     = psramFound() ? 2 : 1;
+  cam.fb_count     = fbCount;
   cam.grab_mode    = CAMERA_GRAB_LATEST;
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
@@ -112,12 +107,12 @@ inline bool cameraInit() {
     Serial.printf("[Camera] Sensor PID: 0x%x\n", s->id.PID);
     s->set_vflip(s, 1);
     s->set_hmirror(s, 0);
-    s->set_framesize(s, (framesize_t)cfg.frameSize);
+    // No set_framesize() call here — the driver already owns that size
+    // from the config above. Calling set_framesize() after init on the
+    // OV3660 can silently fail or reallocate to a smaller buffer.
   }
 
-  // Flush warmup frames so AE/AWB locks and framesize settles.
-  // Parse the last frame's SOF to get the TRUE pixel dimensions
-  // the sensor actually produced — this is what we tell Micro-RTSP.
+  // Flush warmup frames so AE/AWB locks and sensor produces stable output.
   Serial.print("[Camera] Warming up");
   for (int i = 0; i < 8; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
@@ -135,8 +130,8 @@ inline bool cameraInit() {
     delay(80);
   }
 
-  Serial.printf("[Camera] OK — %dMHz PSRAM=%s frameSize=%u\n",
-    cfg.xclkMhz, psramFound() ? "yes" : "NO", cfg.frameSize);
+  Serial.printf("[Camera] OK — %dMHz PSRAM=%s\n",
+    cfg.xclkMhz, psramFound() ? "yes" : "NO");
   camReady = true;
   return true;
 }
@@ -167,5 +162,5 @@ inline const FrameEntry* bufferNextFrame() {
   return f;
 }
 
-inline bool cameraOk()          { return camReady; }
-inline size_t bufferFrameCount(){ return frameBuffer.size(); }
+inline bool cameraOk()           { return camReady; }
+inline size_t bufferFrameCount() { return frameBuffer.size(); }
