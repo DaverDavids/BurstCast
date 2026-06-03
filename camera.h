@@ -76,7 +76,23 @@ inline bool cameraInit() {
     s->set_vflip(s, 1);
     s->set_hmirror(s, 0);
     s->set_framesize(s, (framesize_t)cfg.frameSize);
+
+    // Flush warmup frames after framesize change — the OV sensor needs
+    // several frames to re-lock AE/AWB and produce valid JPEG data.
+    // Without this the first frames are tiny/corrupt (seen as 3KB frames).
+    Serial.print("[Camera] Warming up");
+    for (int i = 0; i < 8; i++) {
+      camera_fb_t* fb = esp_camera_fb_get();
+      if (fb) {
+        if (i == 7) {
+          Serial.printf(" done. Frame size: %u bytes\n", fb->len);
+        }
+        esp_camera_fb_return(fb);
+      }
+      delay(80);
+    }
   }
+
   Serial.printf("[Camera] OK — %dMHz PSRAM=%s\n",
     cfg.xclkMhz, psramFound() ? "yes" : "NO");
   camReady = true;

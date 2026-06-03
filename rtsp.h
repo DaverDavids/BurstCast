@@ -12,9 +12,8 @@
 static uint16_t rtspWidth  = 640;
 static uint16_t rtspHeight = 480;
 
-// Strip DRI (0xdd) and all APPn (0xe0-0xef) markers from a JPEG buffer
-// before passing to CStreamer::streamFrame whose internal decodeJPEGfile
-// does not handle those markers and corrupts the scan pointer.
+// Strip DRI (0xdd) and all APPn (0xe0-0xef) markers from a JPEG buffer.
+// Micro-RTSP's internal JPEG parser chokes on these markers.
 static uint8_t jpegScratch[65536];
 
 static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t* outLen) {
@@ -32,27 +31,50 @@ static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t*
 
   while (p + 2 <= end) {
     if (p[0] != 0xFF) {
+      // Not a marker — raw data (shouldn't happen outside SOS, copy verbatim)
       size_t rem = end - p;
       if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
       break;
     }
     uint8_t marker = p[1];
-    p += 2;
+    p += 2;  // skip FF XX
 
-    if (marker == 0xD8) continue;
-    if (marker == 0xD9) {
+    // Standalone markers (no length field)
+    if (marker == 0xD8) continue;  // SOI
+    if (marker == 0xD9) {          // EOI
       if (dstLen + 2 <= sizeof(jpegScratch)) { dst[dstLen++]=0xFF; dst[dstLen++]=0xD9; }
       break;
     }
-    if (marker >= 0xD0 && marker <= 0xD7) { // RST
+    if (marker >= 0xD0 && marker <= 0xD7) { // RST0-RST7
       if (dstLen + 2 <= sizeof(jpegScratch)) { dst[dstLen++]=0xFF; dst[dstLen++]=marker; }
       continue;
     }
 
+    // All remaining markers have a 2-byte big-endian length that includes itself
     if (p + 2 > end) break;
-    uint16_t segLen = (p[0] << 8) | p[1];
+    uint16_t segLen = (p[0] << 8) | p[1];  // includes the 2 length bytes
+    if (segLen < 2) break;                  // malformed
 
     bool skip = (marker == 0xDD) || (marker >= 0xE0 && marker <= 0xEF);
+
+    if (marker == 0xDA) {
+      // SOS: keep the header, then copy the rest of the file verbatim
+      // (entropy-coded data has no length field; runs to next marker/EOI)
+      if (!skip) {
+        size_t headerTotal = 2 + segLen;  // FF DA + length field + parameters
+        if (dstLen + headerTotal <= sizeof(jpegScratch)) {
+          dst[dstLen++] = 0xFF;
+          dst[dstLen++] = 0xDA;
+          memcpy(dst + dstLen, p, segLen);  // p still points at length bytes
+          dstLen += segLen;
+        }
+      }
+      // p + segLen = first byte of entropy data
+      p += segLen;
+      size_t rem = end - p;
+      if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
+      break;  // nothing after entropy data except EOI which we already include
+    }
 
     if (!skip) {
       size_t total = 2 + segLen;
@@ -61,12 +83,6 @@ static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t*
         dst[dstLen++] = marker;
         memcpy(dst + dstLen, p, segLen);
         dstLen += segLen;
-      }
-      if (marker == 0xDA) { // SOS: copy rest verbatim (scan data)
-        p += segLen;
-        size_t rem = end - p;
-        if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
-        break;
       }
     }
     p += segLen;
@@ -104,7 +120,6 @@ private:
 static WiFiServer     rtspServer(554);
 static BurstStreamer* streamer   = nullptr;
 static uint32_t       lastFrameMs = 0;
-static bool           hasClients  = false;
 
 inline void rtspBegin() {
   sensor_t* s = esp_camera_sensor_get();
@@ -130,19 +145,16 @@ inline void rtspHandle() {
   WiFiClient newClient = rtspServer.accept();
   if (newClient) {
     WiFiClient* heapClient = new WiFiClient(newClient);
-    // Disable Nagle so RTP fragments are sent immediately without buffering
-    heapClient->setNoDelay(true);
+    heapClient->setNoDelay(true);  // disable Nagle for RTP fragments
     streamer->addSession(heapClient);
-    lastFrameMs = 0;  // fire first frame on very next tick
+    lastFrameMs = 0;  // fire first frame on next tick
     Serial.printf("[RTSP] Client: %s\n", heapClient->remoteIP().toString().c_str());
   }
 
-  // handleRequests runs every tick regardless — RTSP handshake (OPTIONS/
-  // DESCRIBE/SETUP/PLAY) must complete as fast as possible, not gated on
-  // anySessions() which is only true AFTER the session is established.
+  // Run RTSP command handling every tick — OPTIONS/DESCRIBE/SETUP/PLAY
+  // must complete at full loop speed, not gated on anySessions().
   streamer->handleRequests(0);
 
-  // Push frames only once session is streaming
   if (streamer->anySessions()) {
     uint32_t interval = cfg.fps > 0 ? 1000UL / cfg.fps : 66;
     if (millis() - lastFrameMs >= interval) {
