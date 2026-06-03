@@ -63,19 +63,14 @@ inline bool cameraInit() {
   else
     Serial.printf("[Camera] PSRAM free: %u KB\n", ESP.getFreePsram() / 1024);
 
-  // OV3660 quirk: the driver only allocates DMA for the config frame_size.
-  // Setting a smaller size at init then calling set_framesize() later works
-  // ONLY if the init size >= the target size (buffer must already be big enough).
-  // Strategy: always init at UXGA (the sensor max = 1600x1200), then
-  // set_framesize() down to the user-configured size. This guarantees the DMA
-  // buffer is always large enough for any target.
-  //
-  // For HD and above we use fb_count=1 to avoid exhausting PSRAM.
-  bool largeFrame = (cfg.frameSize >= 10);
-  uint8_t fbCount = (!psramFound() || largeFrame) ? 1 : 2;
-
-  Serial.printf("[Camera] Init UXGA->frameSize=%u fbCount=%u xclk=%uMHz\n",
-    cfg.frameSize, fbCount, cfg.xclkMhz);
+  // Init directly at the user-configured frame size.
+  // Using GRAB_WHEN_EMPTY during init ensures the sensor is idle when the
+  // PLL and windowing registers are written, so set_framesize() takes effect
+  // reliably. After warmup we switch to GRAB_LATEST for low-latency capture.
+  // fb_count=1 during init avoids a stale second buffer interfering with the
+  // mode switch (matches the reference CameraWebServer pattern).
+  Serial.printf("[Camera] Init frameSize=%u xclk=%uMHz\n",
+    cfg.frameSize, cfg.xclkMhz);
 
   camera_config_t cam = {};
   cam.ledc_channel = LEDC_CHANNEL_0;
@@ -94,10 +89,10 @@ inline bool cameraInit() {
   cam.pin_reset    = CAM_PIN_RESET;
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
-  cam.frame_size   = FRAMESIZE_UXGA;  // always init at max so DMA buf is large enough
+  cam.frame_size   = (framesize_t)cfg.frameSize;  // init at target size directly
   cam.jpeg_quality = cfg.jpegQuality;
-  cam.fb_count     = fbCount;
-  cam.grab_mode    = CAMERA_GRAB_LATEST;
+  cam.fb_count     = 1;                           // always 1 during init
+  cam.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;      // idle sensor during mode config
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
   esp_err_t err = esp_camera_init(&cam);
@@ -115,18 +110,8 @@ inline bool cameraInit() {
   s->set_vflip(s, 1);
   s->set_hmirror(s, 0);
 
-  // Resize to the user-configured size.
-  // OV3660 driver quirk: after set_framesize(), the first fb_get() still
-  // returns the old size. Must grab+discard twice to flush the pipeline.
-  if ((framesize_t)cfg.frameSize != FRAMESIZE_UXGA) {
-    s->set_framesize(s, (framesize_t)cfg.frameSize);
-    // Double-flush: first grab returns stale UXGA frame, second returns new size
-    camera_fb_t* fb1 = esp_camera_fb_get(); if (fb1) esp_camera_fb_return(fb1);
-    camera_fb_t* fb2 = esp_camera_fb_get(); if (fb2) esp_camera_fb_return(fb2);
-    Serial.printf("[Camera] set_framesize(%u) + double-flush done\n", cfg.frameSize);
-  }
-
-  // Additional warmup: let AE/AWB stabilize and confirm final output size
+  // Warmup: let AE/AWB stabilize and confirm final output size.
+  // On the last frame, parse the JPEG SOF marker to verify actual dimensions.
   Serial.print("[Camera] Warming up");
   for (int i = 0; i < 10; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
@@ -144,8 +129,28 @@ inline bool cameraInit() {
     delay(80);
   }
 
-  Serial.printf("[Camera] OK — %dMHz PSRAM=%s\n",
-    cfg.xclkMhz, psramFound() ? "yes" : "NO");
+  // Switch to GRAB_LATEST + 2 frame buffers (if PSRAM available) for
+  // low-latency burst capture now that init is stable.
+  if (psramFound()) {
+    esp_camera_deinit();
+    cam.fb_count  = 2;
+    cam.grab_mode = CAMERA_GRAB_LATEST;
+    err = esp_camera_init(&cam);
+    if (err != ESP_OK) {
+      Serial.printf("[Camera] Re-init GRAB_LATEST FAILED: 0x%x\n", err);
+      return false;
+    }
+    // Re-apply sensor settings lost on deinit
+    s = esp_camera_sensor_get();
+    if (s) {
+      s->set_vflip(s, 1);
+      s->set_hmirror(s, 0);
+    }
+    Serial.println("[Camera] Switched to GRAB_LATEST fb_count=2");
+  }
+
+  Serial.printf("[Camera] OK — %dMHz PSRAM=%s actual=%ux%u\n",
+    cfg.xclkMhz, psramFound() ? "yes" : "NO", camWidth, camHeight);
   camReady = true;
   return true;
 }
