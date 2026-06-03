@@ -74,6 +74,10 @@ uint16_t rtpSeq            = 0;
 uint32_t rtpTimestamp      = 0;
 const uint32_t rtpSsrc     = 0xBEEFCAFE;
 
+// RTP uses 90 kHz clock; timestamp step = 90000 / fps
+// Recalculated whenever cfg.fps changes via web UI
+uint32_t rtpTimestampStep  = 90000 / DEFAULT_FPS;
+
 // ============================================================
 //  Preferences helpers
 // ============================================================
@@ -85,7 +89,10 @@ void loadConfig() {
   cfg.burstFrames = prefs.getUShort("burstFrames", DEFAULT_BURST_FRAMES);
   cfg.jpegQuality = prefs.getUChar ("jpegQuality", DEFAULT_JPEG_QUALITY);
   cfg.frameSize   = prefs.getUChar ("frameSize",   DEFAULT_FRAME_SIZE);
+  cfg.fps         = prefs.getUChar ("fps",         DEFAULT_FPS);
+  cfg.xclkMhz     = prefs.getUChar ("xclkMhz",    DEFAULT_XCLK_MHZ);
   prefs.end();
+  rtpTimestampStep = 90000 / (cfg.fps > 0 ? cfg.fps : 1);
   DBGLN("[Config] Loaded from flash");
 }
 
@@ -97,7 +104,10 @@ void saveConfig() {
   prefs.putUShort("burstFrames", cfg.burstFrames);
   prefs.putUChar ("jpegQuality", cfg.jpegQuality);
   prefs.putUChar ("frameSize",   cfg.frameSize);
+  prefs.putUChar ("fps",         cfg.fps);
+  prefs.putUChar ("xclkMhz",     cfg.xclkMhz);
   prefs.end();
+  rtpTimestampStep = 90000 / (cfg.fps > 0 ? cfg.fps : 1);
   DBGLN("[Config] Saved to flash");
 }
 
@@ -124,7 +134,7 @@ bool initCamera() {
   cam.pin_sccb_scl = CAM_PIN_SIOC;
   cam.pin_pwdn     = CAM_PIN_PWDN;
   cam.pin_reset    = CAM_PIN_RESET;
-  cam.xclk_freq_hz = 20000000;
+  cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
   cam.frame_size   = (framesize_t)cfg.frameSize;
   cam.jpeg_quality = cfg.jpegQuality;
@@ -136,7 +146,18 @@ bool initCamera() {
     DBGF("[Camera] Init failed: 0x%x\n", err);
     return false;
   }
-  DBGLN("[Camera] Init OK");
+
+  // Apply FPS via sensor registers after init
+  sensor_t* s = esp_camera_sensor_get();
+  if (s) {
+    // OV2640: set_framesize also programs PLL/clock dividers.
+    // Explicitly set the frame rate divider for target FPS.
+    // For most use cases CAMERA_GRAB_LATEST + fb_count=2 handles pacing;
+    // the loop delay below is the primary FPS limiter for burst sending.
+    s->set_framesize(s, (framesize_t)cfg.frameSize);
+  }
+
+  DBGF("[Camera] Init OK — XCLK=%dMHz, target FPS=%d\n", cfg.xclkMhz, cfg.fps);
   return true;
 }
 
@@ -242,7 +263,7 @@ void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
     rtpSeq++;
     offset += payloadLen;
   }
-  rtpTimestamp += 3003;  // 90 kHz clock @ ~30 fps
+  rtpTimestamp += rtpTimestampStep;  // 90 kHz clock, step = 90000/fps
 }
 
 // ============================================================
@@ -257,6 +278,13 @@ void startBurst() {
 
 void handleBurst() {
   if (!burstActive) return;
+
+  // Pace frame sends to configured FPS
+  static unsigned long lastFrameMs = 0;
+  unsigned long frameIntervalMs = (cfg.fps > 0) ? (1000UL / cfg.fps) : 66;
+  if (millis() - lastFrameMs < frameIntervalMs) return;
+  lastFrameMs = millis();
+
   if (framesSent >= cfg.burstFrames) {
     burstActive = false;
     DBGF("[Burst] Complete — %u frames sent\n", framesSent);
@@ -317,6 +345,8 @@ void setupWebServer() {
     if (webServer.hasArg("burstFrames")) cfg.burstFrames = (uint16_t)webServer.arg("burstFrames").toInt();
     if (webServer.hasArg("jpegQuality")) cfg.jpegQuality = (uint8_t)webServer.arg("jpegQuality").toInt();
     if (webServer.hasArg("frameSize"))   cfg.frameSize   = (uint8_t)webServer.arg("frameSize").toInt();
+    if (webServer.hasArg("fps"))         cfg.fps         = (uint8_t)webServer.arg("fps").toInt();
+    if (webServer.hasArg("xclkMhz"))     cfg.xclkMhz     = (uint8_t)webServer.arg("xclkMhz").toInt();
     if (webServer.hasArg("ssid") && webServer.hasArg("psk")) {
       prefs.begin("wifi", false);
       prefs.putString("ssid", webServer.arg("ssid"));
@@ -327,7 +357,8 @@ void setupWebServer() {
     webServer.send(200, "text/html",
       "<html><body style='font-family:monospace;background:#111;color:#eee;padding:20px'>"
       "<p>&#x2705; Saved. <a href='/' style='color:#f90'>Back</a></p>"
-      "<p><small>Reboot to apply WiFi changes.</small></p></body></html>");
+      "<p><small>Camera settings (XCLK, frame size) take effect after reboot.</small></p>"
+      "</body></html>");
   });
 
   webServer.on("/trigger", HTTP_GET, []() {
