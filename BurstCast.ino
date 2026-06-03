@@ -295,6 +295,16 @@ void setup() {
   }
   Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n",
     WiFi.localIP().toString().c_str());
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (fb) {
+    Serial.printf("JPEG len=%d, first 32 bytes:\n", fb->len);
+    for (int i = 0; i < 32 && i < fb->len; i++)
+      Serial.printf("%02X ", fb->buf[i]);
+    Serial.println();
+    esp_camera_fb_return(fb);
+  }
+
 }
 
 void loop() {
