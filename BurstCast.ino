@@ -10,7 +10,7 @@
   #define DBG(x)   Serial.print(x)
   #define DBGLN(x) Serial.println(x)
   #define DBGF(...)Serial.printf(__VA_ARGS__)
-else
+#else
   #define DBG(x)
   #define DBGLN(x)
   #define DBGF(...)
