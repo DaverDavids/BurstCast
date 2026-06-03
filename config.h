@@ -7,7 +7,7 @@
 #define HOSTNAME          "burstcast"
 #define AP_SSID           "BurstCast-Setup"
 #define WIFI_TIMEOUT_MS   10000
-#define WIFI_TX_POWER     WIFI_POWER_19_5dBm
+#define WIFI_TX_POWER     WIFI_POWER_11dBm
 #define ACK_MSG           "OK"
 
 #define TRIGGER_PORT        5005
@@ -21,7 +21,7 @@
 #define DEFAULT_FPS           15
 #define DEFAULT_JPEG_QUALITY  12      // 0=best, 63=worst
 #define DEFAULT_FRAME_SIZE    6       // FRAMESIZE_VGA
-#define DEFAULT_XCLK_MHZ      20
+#define DEFAULT_XCLK_MHZ      16
 #define DEFAULT_VISIBLE_SECS  0       // 0 = match clip duration automatically
 
 // States
