@@ -179,6 +179,10 @@ void setupWebServer() {
   });
 
   webServer.on("/save", HTTP_POST, []() {
+    // Snapshot current camera-affecting values to detect changes
+    uint8_t oldFrameSize = cfg.frameSize;
+    uint8_t oldXclkMhz  = cfg.xclkMhz;
+
     if (webServer.hasArg("obsWsIp"))       strlcpy(cfg.obsWsIp,       webServer.arg("obsWsIp").c_str(),       sizeof(cfg.obsWsIp));
     if (webServer.hasArg("obsWsPort"))     cfg.obsWsPort     = webServer.arg("obsWsPort").toInt();
     if (webServer.hasArg("obsWsPass"))     strlcpy(cfg.obsWsPass,     webServer.arg("obsWsPass").c_str(),     sizeof(cfg.obsWsPass));
@@ -193,10 +197,17 @@ void setupWebServer() {
     if (webServer.hasArg("visibleSecs"))   cfg.visibleSecs   = webServer.arg("visibleSecs").toInt();
     saveConfig();
 
-    // Apply framesize to live sensor immediately — no reboot needed
-    sensor_t* s = esp_camera_sensor_get();
-    if (s) {
-        s->set_framesize(s, (framesize_t)cfg.frameSize);
+    // If resolution or clock changed, reinit the camera immediately — no reboot needed.
+    if (cfg.frameSize != oldFrameSize || cfg.xclkMhz != oldXclkMhz) {
+      Serial.printf("[Camera] Settings changed (frameSize %u->%u, xclk %u->%u) — reinitializing...\n",
+        oldFrameSize, cfg.frameSize, oldXclkMhz, cfg.xclkMhz);
+      burstState = STATE_IDLE;
+      if (cameraReinit()) {
+        rtspBegin(camWidth, camHeight);
+        Serial.printf("[Camera] Reinit OK — %ux%u\n", camWidth, camHeight);
+      } else {
+        Serial.println("[Camera] Reinit FAILED");
+      }
     }
 
     webServer.send(200, "application/json", "{\"ok\":true}");

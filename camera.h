@@ -23,6 +23,26 @@
 #define CAM_PIN_HREF     7
 #define CAM_PIN_PCLK    13
 
+// Maps UI dropdown index (0-12) to the correct framesize_t enum value.
+// The framesize_t enum starts at FRAMESIZE_96X96=0, so QQVGA=1, QCIF=2, etc.
+// Our UI skips 96x96, so index 0 = QQVGA = enum value 1.
+static const framesize_t FRAMESIZE_MAP[] = {
+  FRAMESIZE_QQVGA,    // 0  -> 160x120
+  FRAMESIZE_QCIF,     // 1  -> 176x144
+  FRAMESIZE_HQVGA,    // 2  -> 240x176
+  FRAMESIZE_240X240,  // 3  -> 240x240
+  FRAMESIZE_QVGA,     // 4  -> 320x240
+  FRAMESIZE_CIF,      // 5  -> 400x296
+  FRAMESIZE_HVGA,     // 6  -> 480x320
+  FRAMESIZE_VGA,      // 7  -> 640x480
+  FRAMESIZE_SVGA,     // 8  -> 800x600
+  FRAMESIZE_XGA,      // 9  -> 1024x768
+  FRAMESIZE_HD,       // 10 -> 1280x720
+  FRAMESIZE_SXGA,     // 11 -> 1280x1024
+  FRAMESIZE_UXGA,     // 12 -> 1600x1200
+};
+#define FRAMESIZE_MAP_COUNT 13
+
 struct FrameEntry {
   uint8_t* buf;
   size_t   len;
@@ -58,8 +78,10 @@ static bool jpegSOFDims(const uint8_t* buf, size_t len, uint16_t* w, uint16_t* h
 }
 
 inline bool cameraInit() {
-  Serial.printf("[Camera] frameSize=%u xclkMhz=%u quality=%u\n",
-    cfg.frameSize, cfg.xclkMhz, cfg.jpegQuality);
+  Serial.printf("[Camera] frameSize=%u (enum %u) xclkMhz=%u quality=%u\n",
+    cfg.frameSize,
+    cfg.frameSize < FRAMESIZE_MAP_COUNT ? (uint8_t)FRAMESIZE_MAP[cfg.frameSize] : 0xff,
+    cfg.xclkMhz, cfg.jpegQuality);
 
   if (!psramFound())
     Serial.println("[Camera] WARNING: PSRAM not found!");
@@ -87,13 +109,13 @@ inline bool cameraInit() {
   cam.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
-  // OV3660 fix: always init at UXGA so the DMA buffer is maximally allocated
-  // and the sensor scaler initializes correctly. Then call set_framesize() to
-  // downscale to the target — exactly what the reference CameraWebServer does.
+  // Always init at UXGA so the DMA buffer is maximally allocated and the
+  // OV3660 scaler initialises correctly; then downscale via set_framesize().
   if (psramFound()) {
     cam.frame_size   = FRAMESIZE_UXGA;
     cam.jpeg_quality = 10;
-    cam.fb_count     = 1;
+    cam.fb_count     = 2;
+    cam.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
     cam.frame_size = FRAMESIZE_SVGA;
     cam.fb_count   = 1;
@@ -118,10 +140,14 @@ inline bool cameraInit() {
     s->set_saturation(s, 2);
   }
 
-  // Now downscale to the user's configured target resolution.
-  // This is the canonical fix: set_framesize() from UXGA works correctly;
-  // initing directly at the target size does not on OV3660.
-  s->set_framesize(s, (framesize_t)cfg.frameSize);
+  // Downscale to the user's configured target resolution using the correct
+  // enum value from FRAMESIZE_MAP (fixes the off-by-one index bug).
+  framesize_t target = (cfg.frameSize < FRAMESIZE_MAP_COUNT)
+                       ? FRAMESIZE_MAP[cfg.frameSize]
+                       : FRAMESIZE_VGA;
+  if (target != FRAMESIZE_UXGA) {
+    s->set_framesize(s, target);
+  }
 
   // Warmup: discard early frames while AE/AWB settle at the new window size
   Serial.print("[Camera] Warming up");
@@ -152,6 +178,15 @@ inline bool cameraInit() {
 
   camReady = true;
   return true;
+}
+
+// Full deinit + reinit — required when changing resolution or XCLK at runtime.
+inline bool cameraReinit() {
+  camReady = false;
+  bufferClear();
+  esp_camera_deinit();
+  delay(100);
+  return cameraInit();
 }
 
 inline void bufferClear() {
