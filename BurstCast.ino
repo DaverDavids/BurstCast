@@ -50,28 +50,30 @@ void loadConfig() {
   strlcpy(cfg.obsWsPass,     prefs.getString("obsWsPass", "").c_str(), sizeof(cfg.obsWsPass));
   strlcpy(cfg.obsSceneName,  prefs.getString("obsScene",  "").c_str(), sizeof(cfg.obsSceneName));
   strlcpy(cfg.obsSourceName, prefs.getString("obsSrc",    DEFAULT_SOURCE_NAME).c_str(), sizeof(cfg.obsSourceName));
-  cfg.triggerPort  = prefs.getUShort("trigPort",    TRIGGER_PORT);
-  cfg.burstFrames  = prefs.getUShort("burstFrames", DEFAULT_BURST_FRAMES);
-  cfg.jpegQuality  = prefs.getUChar ("jpegQuality", DEFAULT_JPEG_QUALITY);
-  cfg.frameSize    = prefs.getUChar ("frameSize",   DEFAULT_FRAME_SIZE);
-  cfg.fps          = prefs.getUChar ("fps",         DEFAULT_FPS);
-  cfg.xclkMhz      = prefs.getUChar ("xclkMhz",    DEFAULT_XCLK_MHZ);
+  cfg.triggerPort  = prefs.getUShort("trigPort",     TRIGGER_PORT);
+  cfg.burstFrames  = prefs.getUShort("burstFrames",  DEFAULT_BURST_FRAMES);
+  cfg.jpegQuality  = prefs.getUChar ("jpegQuality",  DEFAULT_JPEG_QUALITY);
+  cfg.frameSize    = prefs.getUChar ("frameSize",    DEFAULT_FRAME_SIZE);
+  cfg.fps          = prefs.getUChar ("fps",          DEFAULT_FPS);
+  cfg.xclkMhz      = prefs.getUChar ("xclkMhz",     DEFAULT_XCLK_MHZ);
+  cfg.visibleSecs  = prefs.getUShort("visibleSecs",  DEFAULT_VISIBLE_SECS);
   prefs.end();
 }
 
 void saveConfig() {
   prefs.begin("burstcast", false);
-  prefs.putString("obsWsIp",   cfg.obsWsIp);
-  prefs.putUShort("obsWsPort", cfg.obsWsPort);
-  prefs.putString("obsWsPass", cfg.obsWsPass);
-  prefs.putString("obsScene",  cfg.obsSceneName);
-  prefs.putString("obsSrc",    cfg.obsSourceName);
-  prefs.putUShort("trigPort",  cfg.triggerPort);
-  prefs.putUShort("burstFrames", cfg.burstFrames);
-  prefs.putUChar ("jpegQuality", cfg.jpegQuality);
-  prefs.putUChar ("frameSize",   cfg.frameSize);
-  prefs.putUChar ("fps",         cfg.fps);
-  prefs.putUChar ("xclkMhz",     cfg.xclkMhz);
+  prefs.putString("obsWsIp",    cfg.obsWsIp);
+  prefs.putUShort("obsWsPort",  cfg.obsWsPort);
+  prefs.putString("obsWsPass",  cfg.obsWsPass);
+  prefs.putString("obsScene",   cfg.obsSceneName);
+  prefs.putString("obsSrc",     cfg.obsSourceName);
+  prefs.putUShort("trigPort",   cfg.triggerPort);
+  prefs.putUShort("burstFrames",cfg.burstFrames);
+  prefs.putUChar ("jpegQuality",cfg.jpegQuality);
+  prefs.putUChar ("frameSize",  cfg.frameSize);
+  prefs.putUChar ("fps",        cfg.fps);
+  prefs.putUChar ("xclkMhz",    cfg.xclkMhz);
+  prefs.putUShort("visibleSecs",cfg.visibleSecs);
   prefs.end();
   Serial.println("[Config] Saved");
 }
@@ -96,16 +98,20 @@ void handleRecording() {
   lastCapMs = millis();
 
   if (bufferFrameCount() >= cfg.burstFrames) {
-    // Recording done
     burstState = STATE_LOOPING;
-    float dur  = (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
-    Serial.printf("[Burst] Done — %u frames, %.1fs\n", (unsigned)bufferFrameCount(), dur);
+    float clipDur = (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
+    Serial.printf("[Burst] Done — %u frames, %.1fs\n",
+      (unsigned)bufferFrameCount(), clipDur);
 
-    // OBS: show source, schedule hide
     if (obsWsReady()) {
       obsSetSourceVisible(true);
-      showUntilMs  = millis() + (uint32_t)(dur * 1000);
+      // visibleSecs == 0 means auto: stay visible for exactly the clip length
+      uint32_t displayMs = cfg.visibleSecs > 0
+        ? (uint32_t)cfg.visibleSecs * 1000
+        : (uint32_t)(clipDur * 1000);
+      showUntilMs  = millis() + displayMs;
       obsHideArmed = true;
+      Serial.printf("[OBS] Source visible for %.1fs\n", displayMs / 1000.0f);
     }
     return;
   }
@@ -196,6 +202,7 @@ void setupWebServer() {
     if (webServer.hasArg("frameSize"))     cfg.frameSize     = webServer.arg("frameSize").toInt();
     if (webServer.hasArg("fps"))           cfg.fps           = webServer.arg("fps").toInt();
     if (webServer.hasArg("xclkMhz"))       cfg.xclkMhz       = webServer.arg("xclkMhz").toInt();
+    if (webServer.hasArg("visibleSecs"))   cfg.visibleSecs   = webServer.arg("visibleSecs").toInt();
     saveConfig();
     webServer.send(200, "application/json", "{\"ok\":true}");
   });
@@ -300,7 +307,6 @@ void loop() {
     handleRecording();
     handleObsHide();
     obsWsHandle();
-    // WiFi watchdog
     static uint32_t lastWifi = 0;
     if (millis() - lastWifi > 10000) {
       lastWifi = millis();

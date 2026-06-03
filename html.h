@@ -27,7 +27,7 @@ String buildConfigPage(bool camOk) {
   static const uint16_t FH[] = {120,144,176,240,240,296,320,480,600, 768, 720,1024,1200};
 
   String h;
-  h.reserve(6000);
+  h.reserve(6500);
   h += F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
          "<meta name='viewport' content='width=device-width,initial-scale=1'>"
          "<title>BurstCast</title>"
@@ -44,6 +44,7 @@ String buildConfigPage(bool camOk) {
          "button.danger{background:#f00;color:#fff}"
          ".status{display:inline-block;padding:.2em .6em;border-radius:3px;font-size:.8em;font-weight:bold}"
          ".ok{background:#0a0;color:#0f0}.fail{background:#500;color:#f00}"
+         ".hint{color:#555;font-size:.78em;margin-top:.15em}"
          "#log{background:#000;border:1px solid #333;padding:.5em;height:80px;overflow-y:auto;font-size:.75em;color:#888}"
          "</style></head><body>");
 
@@ -83,7 +84,17 @@ String buildConfigPage(bool camOk) {
   h += F("'></label>"
          "<label>Source Name (in OBS)<input name='obsSourceName' value='");
   h += cfg.obsSourceName;
-  h += F("'></label></div>");
+  h += F("'></label>"
+         "<div class='row'>"
+         "<label>Source Visible (sec)<input name='visibleSecs' type='number' min='0' max='3600'"
+         " id='visSecs' value='");
+  h += cfg.visibleSecs;
+  h += F("'>"
+         "<div class='hint' id='visHint'></div></label>"
+         "<div style='padding-top:1.4em;font-size:.8em;color:#555'>"
+         "0 = auto (matches clip length)</div>"
+         "</div>"
+         "</div>");
 
   // Camera settings
   h += F("<div class='card'><h2>Camera</h2><div class='row'>"
@@ -106,13 +117,14 @@ String buildConfigPage(bool camOk) {
          "<label>JPEG Quality (0=best)<input name='jpegQuality' type='number' min='0' max='63' value='");
   h += cfg.jpegQuality;
   h += F("'></label></div><div class='row'>"
-         "<label>FPS<input name='fps' type='number' min='1' max='30' value='");
+         "<label>FPS<input name='fps' type='number' min='1' max='30' id='fpsin' value='");
   h += cfg.fps;
   h += F("'></label>"
          "<label>XCLK MHz<input name='xclkMhz' type='number' min='10' max='40' value='");
   h += cfg.xclkMhz;
   h += F("'></label></div>"
-         "<label>Burst Frames<input name='burstFrames' type='number' min='1' max='900' value='");
+         "<label>Burst Frames<input name='burstFrames' type='number' min='1' max='900'"
+         " id='bfin' value='");
   h += cfg.burstFrames;
   h += F("'> <span style='color:#555;font-size:.8em' id='bdur'></span></label></div>");
 
@@ -147,14 +159,29 @@ String buildConfigPage(bool camOk) {
          "    document.getElementById('rssi').textContent='RSSI '+j.rssi+'dBm | '+j.frames+' frames';"
          "  }).catch(()=>{});"
          "}"
-         "function updateDur(){"
-         "  const fr=+document.querySelector('[name=burstFrames]').value||0;"
-         "  const fp=+document.querySelector('[name=fps]').value||15;"
-         "  document.getElementById('bdur').textContent='= '+(fr/fp).toFixed(1)+'s';"
+         "function clipDur(){"
+         "  const fr=+document.getElementById('bfin').value||0;"
+         "  const fp=+document.getElementById('fpsin').value||15;"
+         "  return fr/fp;"
          "}"
-         "document.querySelector('[name=burstFrames]').addEventListener('input',updateDur);"
-         "document.querySelector('[name=fps]').addEventListener('input',updateDur);"
-         "updateDur(); setInterval(updateStatus,2000);"
+         "function updateDur(){"
+         "  const d=clipDur();"
+         "  document.getElementById('bdur').textContent='= '+d.toFixed(1)+'s';"
+         "  updateVisHint();"
+         "}"
+         "function updateVisHint(){"
+         "  const v=+document.getElementById('visSecs').value;"
+         "  const hint=document.getElementById('visHint');"
+         "  if(v===0){"
+         "    hint.textContent='auto: '+clipDur().toFixed(1)+'s';"
+         "  } else {"
+         "    hint.textContent=v+'s manual';"
+         "  }"
+         "}"
+         "document.getElementById('bfin').addEventListener('input',updateDur);"
+         "document.getElementById('fpsin').addEventListener('input',updateDur);"
+         "document.getElementById('visSecs').addEventListener('input',updateVisHint);"
+         "updateDur(); updateVisHint(); setInterval(updateStatus,2000);"
          "</script></body></html>");
   return h;
 }

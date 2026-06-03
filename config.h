@@ -22,33 +22,39 @@
 #define DEFAULT_JPEG_QUALITY  12      // 0=best, 63=worst
 #define DEFAULT_FRAME_SIZE    6       // FRAMESIZE_VGA
 #define DEFAULT_XCLK_MHZ      20
+#define DEFAULT_VISIBLE_SECS  0       // 0 = match clip duration automatically
 
 // States
 typedef enum {
-  STATE_IDLE,        // no frames recorded yet, RTSP sends black frame
+  STATE_IDLE,        // no frames recorded yet, RTSP sends live passthrough
   STATE_RECORDING,   // capturing frames into PSRAM buffer
   STATE_LOOPING,     // serving PSRAM buffer in a loop over RTSP
 } BurstState;
 
 struct Config {
-  // Network / OBS RTP (legacy, unused in new arch but kept for compat)
-  char     obsIp[40];        // not used for RTSP push, kept for future
-  uint16_t obsPort;          // not used
+  // Network / OBS (legacy fields kept for NVS compat)
+  char     obsIp[40];
+  uint16_t obsPort;
   uint16_t triggerPort;
 
   // OBS WebSocket
-  char     obsWsIp[40];      // OBS machine IP
+  char     obsWsIp[40];
   uint16_t obsWsPort;
   char     obsWsPass[64];
   char     obsSceneName[64];
   char     obsSourceName[64];
 
-  // Camera
+  // Camera / burst
   uint16_t burstFrames;
   uint8_t  jpegQuality;
   uint8_t  frameSize;
   uint8_t  fps;
   uint8_t  xclkMhz;
+
+  // OBS source visibility
+  // 0 = auto (source stays visible for exactly the clip duration)
+  // >0 = manual override in whole seconds
+  uint16_t visibleSecs;
 };
 
 inline Config cfg = {
@@ -65,6 +71,7 @@ inline Config cfg = {
   .frameSize     = DEFAULT_FRAME_SIZE,
   .fps           = DEFAULT_FPS,
   .xclkMhz       = DEFAULT_XCLK_MHZ,
+  .visibleSecs   = DEFAULT_VISIBLE_SECS,
 };
 
 inline BurstState burstState = STATE_IDLE;
