@@ -34,6 +34,62 @@ static std::vector<FrameEntry> frameBuffer;
 static volatile uint16_t       playbackIdx  = 0;
 static volatile bool           camReady     = false;
 
+// ============================================================
+//  JPEG structure debug helper
+//  Parses SOF (actual pixel dims) and DQT (quantisation table
+//  precision + first 4 AC coefficients) from a raw JPEG buffer.
+//  Call after warmup and on first streamed frame.
+// ============================================================
+inline void debugJpegFrame(const uint8_t* buf, size_t len, const char* tag) {
+  Serial.printf("[JPEG/%s] len=%u first4: %02X %02X %02X %02X\n",
+    tag, (unsigned)len,
+    len>0?buf[0]:0, len>1?buf[1]:0, len>2?buf[2]:0, len>3?buf[3]:0);
+
+  const uint8_t* p   = buf + 2;  // skip SOI (FF D8)
+  const uint8_t* end = buf + len;
+  bool foundSOF = false, foundDQT = false;
+
+  while (p + 4 <= end) {
+    if (p[0] != 0xFF) { Serial.printf("[JPEG/%s] Lost sync at offset %u\n", tag, (unsigned)(p-buf)); break; }
+    uint8_t marker = p[1];
+    p += 2;
+    if (marker == 0xD9) break;  // EOI
+    if (marker >= 0xD0 && marker <= 0xD8) continue;  // standalone
+
+    if (p + 2 > end) break;
+    uint16_t segLen = (p[0] << 8) | p[1];  // includes 2-byte length field
+    if (segLen < 2 || p + segLen > end) {
+      Serial.printf("[JPEG/%s] Bad segLen=%u at marker %02X\n", tag, segLen, marker);
+      break;
+    }
+
+    if ((marker == 0xC0 || marker == 0xC2) && !foundSOF) {
+      // SOF0 / SOF2: precision(1) height(2) width(2) components(1)
+      if (segLen >= 9) {
+        uint8_t  prec = p[2];
+        uint16_t h    = (p[3]<<8)|p[4];
+        uint16_t w    = (p[5]<<8)|p[6];
+        uint8_t  comp = p[7];
+        Serial.printf("[JPEG/%s] SOF%d: %ux%u prec=%u components=%u\n",
+          tag, marker==0xC0?0:2, w, h, prec, comp);
+        foundSOF = true;
+      }
+    }
+
+    if (marker == 0xDB && !foundDQT) {
+      // DQT: id/precision byte + 64 coefficients
+      uint8_t qt = p[2];  // bits 0-3 = table id, bit 4 = precision (0=8bit,1=16bit)
+      Serial.printf("[JPEG/%s] DQT: table=%u precision=%s first_AC_coeff=%u\n",
+        tag, qt & 0x0F, (qt>>4) ? "16-bit" : "8-bit", p[3]);
+      foundDQT = true;
+    }
+
+    if (marker == 0xDA) break;  // SOS — entropy data follows, stop
+    p += segLen;
+  }
+  if (!foundSOF) Serial.printf("[JPEG/%s] WARNING: SOF marker not found!\n", tag);
+}
+
 inline bool cameraInit() {
   if (!psramFound()) {
     Serial.println("[Camera] PSRAM not found! Check board PSRAM setting = OPI PSRAM");
@@ -77,15 +133,14 @@ inline bool cameraInit() {
     s->set_hmirror(s, 0);
     s->set_framesize(s, (framesize_t)cfg.frameSize);
 
-    // Flush warmup frames after framesize change — the OV sensor needs
-    // several frames to re-lock AE/AWB and produce valid JPEG data.
-    // Without this the first frames are tiny/corrupt (seen as 3KB frames).
+    // Flush warmup frames after framesize change
     Serial.print("[Camera] Warming up");
     for (int i = 0; i < 8; i++) {
       camera_fb_t* fb = esp_camera_fb_get();
       if (fb) {
         if (i == 7) {
           Serial.printf(" done. Frame size: %u bytes\n", fb->len);
+          debugJpegFrame(fb->buf, fb->len, "warmup");
         }
         esp_camera_fb_return(fb);
       }
@@ -99,7 +154,6 @@ inline bool cameraInit() {
   return true;
 }
 
-// Free old buffer and allocate fresh from PSRAM
 inline void bufferClear() {
   for (auto& f : frameBuffer) {
     if (f.buf) heap_caps_free(f.buf);
@@ -108,7 +162,6 @@ inline void bufferClear() {
   playbackIdx = 0;
 }
 
-// Copy one camera frame into PSRAM-backed buffer
 inline bool bufferAppendFrame() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return false;
@@ -121,7 +174,6 @@ inline bool bufferAppendFrame() {
   return copy != nullptr;
 }
 
-// Returns the next frame in the loop (wraps)
 inline const FrameEntry* bufferNextFrame() {
   if (frameBuffer.empty()) return nullptr;
   const FrameEntry* f = &frameBuffer[playbackIdx];

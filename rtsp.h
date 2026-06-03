@@ -13,7 +13,6 @@ static uint16_t rtspWidth  = 640;
 static uint16_t rtspHeight = 480;
 
 // Strip DRI (0xdd) and all APPn (0xe0-0xef) markers from a JPEG buffer.
-// Micro-RTSP's internal JPEG parser chokes on these markers.
 static uint8_t jpegScratch[65536];
 
 static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t* outLen) {
@@ -31,49 +30,43 @@ static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t*
 
   while (p + 2 <= end) {
     if (p[0] != 0xFF) {
-      // Not a marker — raw data (shouldn't happen outside SOS, copy verbatim)
       size_t rem = end - p;
       if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
       break;
     }
     uint8_t marker = p[1];
-    p += 2;  // skip FF XX
+    p += 2;
 
-    // Standalone markers (no length field)
-    if (marker == 0xD8) continue;  // SOI
-    if (marker == 0xD9) {          // EOI
+    if (marker == 0xD8) continue;
+    if (marker == 0xD9) {
       if (dstLen + 2 <= sizeof(jpegScratch)) { dst[dstLen++]=0xFF; dst[dstLen++]=0xD9; }
       break;
     }
-    if (marker >= 0xD0 && marker <= 0xD7) { // RST0-RST7
+    if (marker >= 0xD0 && marker <= 0xD7) {
       if (dstLen + 2 <= sizeof(jpegScratch)) { dst[dstLen++]=0xFF; dst[dstLen++]=marker; }
       continue;
     }
 
-    // All remaining markers have a 2-byte big-endian length that includes itself
     if (p + 2 > end) break;
-    uint16_t segLen = (p[0] << 8) | p[1];  // includes the 2 length bytes
-    if (segLen < 2) break;                  // malformed
+    uint16_t segLen = (p[0] << 8) | p[1];
+    if (segLen < 2) break;
 
     bool skip = (marker == 0xDD) || (marker >= 0xE0 && marker <= 0xEF);
 
     if (marker == 0xDA) {
-      // SOS: keep the header, then copy the rest of the file verbatim
-      // (entropy-coded data has no length field; runs to next marker/EOI)
       if (!skip) {
-        size_t headerTotal = 2 + segLen;  // FF DA + length field + parameters
+        size_t headerTotal = 2 + segLen;
         if (dstLen + headerTotal <= sizeof(jpegScratch)) {
           dst[dstLen++] = 0xFF;
           dst[dstLen++] = 0xDA;
-          memcpy(dst + dstLen, p, segLen);  // p still points at length bytes
+          memcpy(dst + dstLen, p, segLen);
           dstLen += segLen;
         }
       }
-      // p + segLen = first byte of entropy data
       p += segLen;
       size_t rem = end - p;
       if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
-      break;  // nothing after entropy data except EOI which we already include
+      break;
     }
 
     if (!skip) {
@@ -110,9 +103,20 @@ public:
   }
 
 private:
+  bool _firstFrame = true;
+
   void sendClean(const uint8_t* buf, size_t len, uint32_t ms) {
     size_t cleanLen = 0;
     const uint8_t* clean = stripBadMarkers(buf, len, &cleanLen);
+
+    // Log the first frame actually sent over RTSP so we can compare
+    // SOF dimensions vs the rtspWidth/rtspHeight the streamer was constructed with.
+    if (_firstFrame) {
+      _firstFrame = false;
+      Serial.printf("[RTSP] Streamer constructed with %ux%u\n", rtspWidth, rtspHeight);
+      debugJpegFrame(clean, cleanLen, "rtsp-first");
+    }
+
     streamFrame(clean, cleanLen, ms);
   }
 };
@@ -141,18 +145,15 @@ inline void rtspBegin() {
 inline void rtspHandle() {
   if (!streamer) return;
 
-  // Accept new client — reset frame timer so first frame fires immediately
   WiFiClient newClient = rtspServer.accept();
   if (newClient) {
     WiFiClient* heapClient = new WiFiClient(newClient);
-    heapClient->setNoDelay(true);  // disable Nagle for RTP fragments
+    heapClient->setNoDelay(true);
     streamer->addSession(heapClient);
-    lastFrameMs = 0;  // fire first frame on next tick
+    lastFrameMs = 0;
     Serial.printf("[RTSP] Client: %s\n", heapClient->remoteIP().toString().c_str());
   }
 
-  // Run RTSP command handling every tick — OPTIONS/DESCRIBE/SETUP/PLAY
-  // must complete at full loop speed, not gated on anySessions().
   streamer->handleRequests(0);
 
   if (streamer->anySessions()) {
