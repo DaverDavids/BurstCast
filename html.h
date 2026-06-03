@@ -1,7 +1,7 @@
 #pragma once
 // ============================================================
 //  html.h — BurstCast web UI
-//  NOTE: config.h must be included before this file.
+//  config.h must be included before this file.
 // ============================================================
 
 #include "config.h"
@@ -14,7 +14,7 @@ static const char* const FRAME_SIZE_LABELS[] = {
   "QVGA (320x240)",    // 4
   "CIF (400x296)",     // 5
   "HVGA (480x320)",    // 6
-  "VGA (640x480)",     // 7  <- default
+  "VGA (640x480)",     // 7
   "SVGA (800x600)",    // 8
   "XGA (1024x768)",    // 9
   "HD (1280x720)",     // 10
@@ -23,7 +23,7 @@ static const char* const FRAME_SIZE_LABELS[] = {
 };
 static const int FRAME_SIZE_COUNT = 13;
 
-// ---- Captive portal WiFi credential form ----
+// ---- Captive portal WiFi form ----
 static const char CAPTIVE_FORM[] PROGMEM = R"html(
 <!DOCTYPE html><html><head>
 <meta charset="utf-8">
@@ -37,7 +37,6 @@ input{width:100%;padding:8px;background:#222;border:1px solid #444;color:#eee;
       border-radius:4px;box-sizing:border-box;margin-top:4px}
 button{margin-top:20px;width:100%;padding:10px;background:#f90;border:none;
        border-radius:4px;font-size:1em;cursor:pointer;color:#111;font-weight:bold}
-button:hover{background:#fb3}
 </style></head><body>
 <h1>&#x1F4F7; BurstCast</h1>
 <p>Enter WiFi credentials to connect.</p>
@@ -52,125 +51,142 @@ button:hover{background:#fb3}
 // ---- Main config page ----
 String buildConfigPage() {
   String h;
-  h.reserve(4000);
+  h.reserve(4500);
 
   h += F("<!DOCTYPE html><html><head>"
-         "<meta charset='utf-8'>"
-         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-         "<title>BurstCast Config</title>"
-         "<style>"
-         "body{font-family:monospace;background:#111;color:#eee;max-width:520px;margin:40px auto;padding:0 16px}"
-         "h1{color:#f90;margin-bottom:2px}"
-         "h2{color:#aaa;font-size:.9em;margin:18px 0 5px;border-bottom:1px solid #2a2a2a;padding-bottom:3px}"
-         "label{display:block;margin-top:10px;font-size:.88em;color:#ccc}"
-         "input,select{width:100%;padding:7px 8px;background:#1a1a1a;border:1px solid #3a3a3a;"
-         "color:#eee;border-radius:4px;box-sizing:border-box;margin-top:3px}"
-         ".row{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
-         ".row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}"
-         "button{margin-top:16px;width:100%;padding:10px;border:none;border-radius:4px;"
-         "font-size:1em;cursor:pointer;font-weight:bold}"
-         ".btn-save{background:#f90;color:#111}.btn-save:hover{background:#fb3}"
-         ".btn-trig{background:#39c;color:#fff;margin-top:8px}.btn-trig:hover{background:#4ad}"
-         ".status{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;"
-         "padding:9px 12px;margin-top:14px;font-size:.82em;color:#999}"
-         ".on{color:#4f4}.off{color:#f44}"
-         ".note{font-size:.78em;color:#666;margin-top:4px}"
-         "</style></head><body>"
-         "<h1>&#x1F4F7; BurstCast</h1>");
+    "<meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>BurstCast Config</title>"
+    "<style>"
+    "body{font-family:monospace;background:#111;color:#eee;max-width:520px;margin:40px auto;padding:0 16px 40px}"
+    "h1{color:#f90;margin-bottom:2px}"
+    "h2{color:#aaa;font-size:.9em;margin:18px 0 5px;border-bottom:1px solid #2a2a2a;padding-bottom:3px}"
+    "label{display:block;margin-top:10px;font-size:.88em;color:#ccc}"
+    "input,select{width:100%;padding:7px 8px;background:#1a1a1a;border:1px solid #3a3a3a;"
+      "color:#eee;border-radius:4px;box-sizing:border-box;margin-top:3px}"
+    ".row{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
+    ".row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}"
+    ".btn{margin-top:12px;width:100%;padding:10px;border:none;border-radius:4px;"
+      "font-size:1em;cursor:pointer;font-weight:bold;transition:opacity .15s}"
+    ".btn:active{opacity:.7}"
+    ".btn-save{background:#f90;color:#111}"
+    ".btn-trig{background:#39c;color:#fff;margin-top:8px}"
+    ".btn-sdp{background:#292;color:#fff;margin-top:8px}"
+    ".status{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;"
+      "padding:9px 12px;margin-top:14px;font-size:.82em;color:#999}"
+    ".toast{display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);"
+      "background:#333;color:#eee;padding:8px 20px;border-radius:6px;font-size:.85em;z-index:99}"
+    ".on{color:#4f4}.off{color:#f44}"
+    ".note{font-size:.78em;color:#666;margin-top:4px}"
+    "</style></head><body>"
+    "<h1>&#x1F4F7; BurstCast</h1>"
+    "<div class='toast' id='toast'></div>");
 
   h += "<div class='status' id='stat'>Fetching status...</div>";
 
-  h += "<form method='POST' action='/save'>";
+  // ---- Settings form (submitted via fetch, no page nav) ----
+  h += "<form id='cfg'>";
 
-  // --- OBS / Stream ---
   h += "<h2>OBS / Stream Target</h2>";
   h += "<div class='row'>";
-  h += "<label>OBS IP<input name='obsIp' value='";
-  h += cfg.obsIp;
-  h += "' placeholder='192.168.x.x'></label>";
-  h += "<label>RTP Port<input name='obsPort' type='number' min='1' max='65535' value='";
-  h += String(cfg.obsPort);
-  h += "'></label></div>";
-  h += "<p class='note'>In OBS: add a <b>Media Source</b>, uncheck Local File, set input to <b>rtp://@:";
-  h += String(cfg.obsPort);
-  h += "</b></p>";
+  h += "<label>OBS IP<input name='obsIp' value='" + String(cfg.obsIp) + "' placeholder='192.168.x.x'></label>";
+  h += "<label>RTP Port<input name='obsPort' type='number' min='1' max='65535' value='" + String(cfg.obsPort) + "'></label>";
+  h += "</div>";
+  h += "<p class='note'>Point OBS Media Source at <b>http://" + String(WiFi.localIP().toString().c_str()) + "/stream.sdp</b> — "
+       "or <a href='/stream.sdp' style='color:#f90'>download SDP</a> and open as local file.</p>";
 
-  // --- Trigger ---
   h += "<h2>Trigger</h2>";
-  h += "<label>UDP Trigger Port<input name='trigPort' type='number' min='1' max='65535' value='";
-  h += String(cfg.triggerPort);
-  h += "'></label>";
+  h += "<label>UDP Trigger Port<input name='trigPort' type='number' min='1' max='65535' value='" + String(cfg.triggerPort) + "'></label>";
 
-  // --- Camera ---
   h += "<h2>Camera</h2>";
   h += "<label>Frame Size<select name='frameSize'>";
   for (int i = 0; i < FRAME_SIZE_COUNT; i++) {
-    h += "<option value='";
-    h += String(i);
-    h += (i == cfg.frameSize) ? "' selected>" : "'>";
+    h += "<option value='" + String(i) + "'";
+    if (i == cfg.frameSize) h += " selected";
+    h += ">";
     h += FRAME_SIZE_LABELS[i];
     h += "</option>";
   }
   h += "</select></label>";
 
   h += "<div class='row3'>";
-  h += "<label>FPS<input name='fps' type='number' min='1' max='30' value='";
-  h += String(cfg.fps);
-  h += "'></label>";
+  h += "<label>FPS<input name='fps' type='number' min='1' max='30' value='" + String(cfg.fps) + "'></label>";
+
   h += "<label>XCLK (MHz)<select name='xclkMhz'>";
-  int xclkOptions[] = {8, 16, 20, 24};
+  const int xclkOpts[] = {8, 16, 20, 24};
   for (int i = 0; i < 4; i++) {
-    h += "<option value='";
-    h += String(xclkOptions[i]);
-    h += (xclkOptions[i] == cfg.xclkMhz) ? "' selected>" : "'>";
-    h += String(xclkOptions[i]);
-    h += " MHz</option>";
+    h += "<option value='" + String(xclkOpts[i]) + "'";
+    if (xclkOpts[i] == cfg.xclkMhz) h += " selected";
+    h += ">" + String(xclkOpts[i]) + " MHz</option>";
   }
   h += "</select></label>";
-  h += "<label>JPEG Quality<input name='jpegQuality' type='number' min='0' max='63' value='";
-  h += String(cfg.jpegQuality);
-  h += "'></label></div>";
-  h += "<p class='note'>XCLK &amp; frame size changes take effect after reboot. FPS is applied immediately.</p>";
 
-  // --- Burst ---
+  h += "<label>JPEG Quality<input name='jpegQuality' type='number' min='0' max='63' value='" + String(cfg.jpegQuality) + "'></label>";
+  h += "</div>";
+  h += "<p class='note'>XCLK &amp; frame size apply after reboot.</p>";
+
   h += "<h2>Burst</h2>";
-  h += "<label>Frames per burst<input name='burstFrames' type='number' min='1' max='9999' value='";
-  h += String(cfg.burstFrames);
-  h += "'></label>";
-  // Show calculated duration
-  h += "<p class='note' id='dur'>";
-  h += String((float)cfg.burstFrames / (cfg.fps > 0 ? cfg.fps : 1), 1);
-  h += "s at current FPS</p>";
+  h += "<label>Frames per burst<input name='burstFrames' id='bf' type='number' min='1' max='9999' value='" + String(cfg.burstFrames) + "'></label>";
+  h += "<p class='note' id='dur'>" + String((float)cfg.burstFrames / (cfg.fps > 0 ? cfg.fps : 1), 1) + "s at current FPS</p>";
 
-  h += "<button type='submit' class='btn-save'>&#x1F4BE; Save Settings</button>";
+  h += "<button type='submit' class='btn btn-save'>&#x1F4BE; Save Settings</button>";
   h += "</form>";
 
-  h += "<form method='GET' action='/trigger'>";
-  h += "<button type='submit' class='btn-trig'>&#x25B6; Manual Trigger</button>";
-  h += "</form>";
+  // Trigger and SDP buttons — plain buttons, no form, no navigation
+  h += "<button class='btn btn-trig' onclick='triggerBurst()'>&#x25B6; Manual Trigger</button>";
+  h += "<button class='btn btn-sdp' onclick='window.location=\"/stream.sdp\"'>&#x1F4E5; Download SDP for OBS</button>";
 
+  // JavaScript — all actions via fetch, no page navigations
   h += R"js(
 <script>
-function poll(){
-  fetch('/status').then(function(r){return r.json();}).then(function(d){
-    document.getElementById('stat').innerHTML=
-      'IP: <b>'+d.ip+'</b> &nbsp; RSSI: <b>'+d.rssi+' dBm</b>'
-      +' &nbsp; Burst: <b class="'+(d.burst?'on':'off')+'">'+(d.burst?'ACTIVE':'IDLE')+'</b>'
-      +' &nbsp; Frames: <b>'+d.framesSent+'</b>';
-  }).catch(function(){});
+function toast(msg, ok) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = ok ? '#1a4a1a' : '#4a1a1a';
+  t.style.display = 'block';
+  clearTimeout(t._tid);
+  t._tid = setTimeout(function(){ t.style.display='none'; }, 2500);
 }
-// Update duration hint live
-var framesInput=document.querySelector('[name=burstFrames]');
-var fpsInput=document.querySelector('[name=fps]');
-function updateDur(){
-  var f=parseInt(framesInput.value)||1;
-  var fps=parseInt(fpsInput.value)||1;
-  document.getElementById('dur').textContent=(f/fps).toFixed(1)+'s at current FPS';
+
+document.getElementById('cfg').addEventListener('submit', function(e) {
+  e.preventDefault();
+  var fd = new FormData(this);
+  fetch('/save', { method:'POST', body: fd })
+    .then(function(r){ return r.json(); })
+    .then(function(d){ toast(d.ok ? '\u2705 Saved' : '\u274C Error', d.ok); })
+    .catch(function(){ toast('\u274C No response', false); });
+});
+
+function triggerBurst() {
+  fetch('/trigger')
+    .then(function(r){ return r.json(); })
+    .then(function(d){ toast(d.ok ? '\u25B6 Burst triggered' : '\u274C Error', d.ok); })
+    .catch(function(){ toast('\u274C No response', false); });
 }
-framesInput.addEventListener('input',updateDur);
-fpsInput.addEventListener('input',updateDur);
+
+function poll() {
+  fetch('/status')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.getElementById('stat').innerHTML =
+        'IP: <b>' + d.ip + '</b> &nbsp; RSSI: <b>' + d.rssi + ' dBm</b>'
+        + ' &nbsp; Burst: <b class="' + (d.burst ? 'on' : 'off') + '">' + (d.burst ? 'ACTIVE' : 'IDLE') + '</b>'
+        + ' &nbsp; Frames: <b>' + d.framesSent + '</b>';
+    }).catch(function(){});
+}
+
+var bfInput = document.getElementById('bf');
+var fpsInput = document.querySelector('[name=fps]');
+function updateDur() {
+  var f = parseInt(bfInput.value) || 1;
+  var fps = parseInt(fpsInput.value) || 1;
+  document.getElementById('dur').textContent = (f / fps).toFixed(1) + 's at current FPS';
+}
+bfInput.addEventListener('input', updateDur);
+fpsInput.addEventListener('input', updateDur);
+
 poll();
-setInterval(poll,2000);
+setInterval(poll, 2000);
 </script>
 )js";
 

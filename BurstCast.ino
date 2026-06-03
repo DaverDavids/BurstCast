@@ -74,9 +74,12 @@ uint16_t rtpSeq            = 0;
 uint32_t rtpTimestamp      = 0;
 const uint32_t rtpSsrc     = 0xBEEFCAFE;
 
-// RTP uses 90 kHz clock; timestamp step = 90000 / fps
-// Recalculated whenever cfg.fps changes via web UI
+// RTP 90 kHz clock; step = 90000 / fps
 uint32_t rtpTimestampStep  = 90000 / DEFAULT_FPS;
+
+// Frame dimensions lookup (width, height) indexed by framesize_t
+static const uint16_t FRAME_W[] = {160,176,240,240,320,400,480,640,800,1024,1280,1280,1600};
+static const uint16_t FRAME_H[] = {120,144,176,240,240,296,320,480,600, 768, 720,1024,1200};
 
 // ============================================================
 //  Preferences helpers
@@ -146,19 +149,46 @@ bool initCamera() {
     DBGF("[Camera] Init failed: 0x%x\n", err);
     return false;
   }
-
-  // Apply FPS via sensor registers after init
   sensor_t* s = esp_camera_sensor_get();
-  if (s) {
-    // OV2640: set_framesize also programs PLL/clock dividers.
-    // Explicitly set the frame rate divider for target FPS.
-    // For most use cases CAMERA_GRAB_LATEST + fb_count=2 handles pacing;
-    // the loop delay below is the primary FPS limiter for burst sending.
-    s->set_framesize(s, (framesize_t)cfg.frameSize);
-  }
+  if (s) s->set_framesize(s, (framesize_t)cfg.frameSize);
 
-  DBGF("[Camera] Init OK — XCLK=%dMHz, target FPS=%d\n", cfg.xclkMhz, cfg.fps);
+  DBGF("[Camera] Init OK — XCLK=%dMHz FPS=%d\n", cfg.xclkMhz, cfg.fps);
   return true;
+}
+
+// ============================================================
+//  Build SDP string for OBS Media Source
+//  Returns a minimal RFC 4566 SDP describing the RTP/JPEG stream.
+// ============================================================
+String buildSdp() {
+  uint8_t  fs = cfg.frameSize < 13 ? cfg.frameSize : 7;
+  uint16_t w  = FRAME_W[fs];
+  uint16_t h  = FRAME_H[fs];
+
+  String sdp;
+  sdp.reserve(300);
+  sdp += "v=0\r\n";
+  sdp += "o=- 0 0 IN IP4 ";
+  sdp += WiFi.localIP().toString();
+  sdp += "\r\n";
+  sdp += "s=BurstCast\r\n";
+  sdp += "c=IN IP4 ";
+  sdp += WiFi.localIP().toString();
+  sdp += "\r\n";
+  sdp += "t=0 0\r\n";
+  sdp += "m=video ";
+  sdp += String(cfg.obsPort);
+  sdp += " RTP/AVP 26\r\n";          // PT 26 = JPEG
+  sdp += "a=rtpmap:26 JPEG/90000\r\n";
+  sdp += "a=fmtp:26 width=";
+  sdp += String(w);
+  sdp += ";height=";
+  sdp += String(h);
+  sdp += "\r\n";
+  sdp += "a=framerate:";
+  sdp += String(cfg.fps);
+  sdp += "\r\n";
+  return sdp;
 }
 
 // ============================================================
@@ -199,15 +229,15 @@ void connectWiFi() {
 void setupMDNS() {
   if (MDNS.begin(HOSTNAME)) {
     MDNS.addService("http", "tcp", 80);
-    DBGF("[mDNS] Advertising as http://%s.local\n", HOSTNAME);
+    DBGF("[mDNS] http://%s.local\n", HOSTNAME);
   }
 }
 
 void setupOTA() {
   ArduinoOTA.setHostname(HOSTNAME);
-  ArduinoOTA.onStart([]()             { DBGLN("[OTA] Start"); });
-  ArduinoOTA.onEnd([]()               { DBGLN("[OTA] End"); });
-  ArduinoOTA.onError([](ota_error_t e) { DBGF("[OTA] Error %u\n", e); });
+  ArduinoOTA.onStart([]()              { DBGLN("[OTA] Start"); });
+  ArduinoOTA.onEnd([]()                { DBGLN("[OTA] End"); });
+  ArduinoOTA.onError([](ota_error_t e)  { DBGF("[OTA] Error %u\n", e); });
   ArduinoOTA.begin();
   DBGLN("[OTA] Ready");
 }
@@ -231,9 +261,8 @@ void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
                         ? (jpegLen - offset) : MAX_RTP_PAYLOAD;
     bool last = (offset + payloadLen >= jpegLen);
 
-    // RTP header
     pkt[0]  = 0x80;
-    pkt[1]  = (last ? 0x80 : 0x00) | 26;  // M bit + PT 26 (JPEG)
+    pkt[1]  = (last ? 0x80 : 0x00) | 26;
     pkt[2]  = (rtpSeq >> 8) & 0xFF;
     pkt[3]  =  rtpSeq & 0xFF;
     pkt[4]  = (rtpTimestamp >> 24) & 0xFF;
@@ -244,7 +273,6 @@ void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
     pkt[9]  = (rtpSsrc >> 16) & 0xFF;
     pkt[10] = (rtpSsrc >>  8) & 0xFF;
     pkt[11] =  rtpSsrc & 0xFF;
-    // JPEG header (RFC 2435 §3.1)
     pkt[12] = 0;
     pkt[13] = (offset >> 16) & 0xFF;
     pkt[14] = (offset >>  8) & 0xFF;
@@ -255,7 +283,6 @@ void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
     pkt[19] = 0;
 
     memcpy(pkt + RTP_HDR_LEN + JPEG_HDR_LEN, jpegData + offset, payloadLen);
-
     udpRtp.beginPacket(cfg.obsIp, cfg.obsPort);
     udpRtp.write(pkt, RTP_HDR_LEN + JPEG_HDR_LEN + payloadLen);
     udpRtp.endPacket();
@@ -263,7 +290,7 @@ void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
     rtpSeq++;
     offset += payloadLen;
   }
-  rtpTimestamp += rtpTimestampStep;  // 90 kHz clock, step = 90000/fps
+  rtpTimestamp += rtpTimestampStep;
 }
 
 // ============================================================
@@ -279,7 +306,6 @@ void startBurst() {
 void handleBurst() {
   if (!burstActive) return;
 
-  // Pace frame sends to configured FPS
   static unsigned long lastFrameMs = 0;
   unsigned long frameIntervalMs = (cfg.fps > 0) ? (1000UL / cfg.fps) : 66;
   if (millis() - lastFrameMs < frameIntervalMs) return;
@@ -322,6 +348,8 @@ void handleTrigger() {
 //  Web server
 // ============================================================
 void setupWebServer() {
+
+  // Only redirect unknown requests when in captive portal mode
   webServer.onNotFound([]() {
     if (captivePortalMode) {
       webServer.sendHeader("Location", "http://192.168.4.1/");
@@ -331,6 +359,7 @@ void setupWebServer() {
     }
   });
 
+  // Main config page
   webServer.on("/", HTTP_GET, []() {
     if (captivePortalMode)
       webServer.send(200, "text/html", FPSTR(CAPTIVE_FORM));
@@ -338,15 +367,16 @@ void setupWebServer() {
       webServer.send(200, "text/html", buildConfigPage());
   });
 
+  // Save — responds with JSON so the page uses fetch(), no navigation
   webServer.on("/save", HTTP_POST, []() {
     if (webServer.hasArg("obsIp"))       strlcpy(cfg.obsIp, webServer.arg("obsIp").c_str(), sizeof(cfg.obsIp));
     if (webServer.hasArg("obsPort"))     cfg.obsPort     = (uint16_t)webServer.arg("obsPort").toInt();
     if (webServer.hasArg("trigPort"))    cfg.triggerPort = (uint16_t)webServer.arg("trigPort").toInt();
     if (webServer.hasArg("burstFrames")) cfg.burstFrames = (uint16_t)webServer.arg("burstFrames").toInt();
-    if (webServer.hasArg("jpegQuality")) cfg.jpegQuality = (uint8_t)webServer.arg("jpegQuality").toInt();
-    if (webServer.hasArg("frameSize"))   cfg.frameSize   = (uint8_t)webServer.arg("frameSize").toInt();
-    if (webServer.hasArg("fps"))         cfg.fps         = (uint8_t)webServer.arg("fps").toInt();
-    if (webServer.hasArg("xclkMhz"))     cfg.xclkMhz     = (uint8_t)webServer.arg("xclkMhz").toInt();
+    if (webServer.hasArg("jpegQuality")) cfg.jpegQuality = (uint8_t) webServer.arg("jpegQuality").toInt();
+    if (webServer.hasArg("frameSize"))   cfg.frameSize   = (uint8_t) webServer.arg("frameSize").toInt();
+    if (webServer.hasArg("fps"))         cfg.fps         = (uint8_t) webServer.arg("fps").toInt();
+    if (webServer.hasArg("xclkMhz"))     cfg.xclkMhz     = (uint8_t) webServer.arg("xclkMhz").toInt();
     if (webServer.hasArg("ssid") && webServer.hasArg("psk")) {
       prefs.begin("wifi", false);
       prefs.putString("ssid", webServer.arg("ssid"));
@@ -354,18 +384,16 @@ void setupWebServer() {
       prefs.end();
     }
     saveConfig();
-    webServer.send(200, "text/html",
-      "<html><body style='font-family:monospace;background:#111;color:#eee;padding:20px'>"
-      "<p>&#x2705; Saved. <a href='/' style='color:#f90'>Back</a></p>"
-      "<p><small>Camera settings (XCLK, frame size) take effect after reboot.</small></p>"
-      "</body></html>");
+    webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
+  // Trigger — JSON response, called via fetch() from the UI
   webServer.on("/trigger", HTTP_GET, []() {
     startBurst();
-    webServer.send(200, "text/plain", "Burst triggered");
+    webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
+  // Status JSON (polled every 2s by the UI)
   webServer.on("/status", HTTP_GET, []() {
     char json[256];
     snprintf(json, sizeof(json),
@@ -375,6 +403,12 @@ void setupWebServer() {
       WiFi.localIP().toString().c_str(),
       WiFi.RSSI());
     webServer.send(200, "application/json", json);
+  });
+
+  // SDP file for OBS Media Source — download or paste URL into OBS
+  webServer.on("/stream.sdp", HTTP_GET, []() {
+    webServer.sendHeader("Content-Disposition", "attachment; filename=burstcast.sdp");
+    webServer.send(200, "application/sdp", buildSdp());
   });
 
   webServer.begin();
