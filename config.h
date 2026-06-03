@@ -1,7 +1,7 @@
 #pragma once
 // ============================================================
-//  config.h — BurstCast shared config struct
-//  Included FIRST by both BurstCast.ino and html.h
+//  config.h — BurstCast shared config struct + single instance
+//  Include this ONCE before any other BurstCast headers.
 // ============================================================
 
 #define HOSTNAME         "burstcast"
@@ -25,4 +25,13 @@ struct Config {
   uint8_t  frameSize;
 };
 
-extern Config cfg;
+// Single global instance — visible to all files that include config.h.
+// 'inline' (C++17) ensures only one definition across translation units.
+inline Config cfg = {
+  "",                   // obsIp
+  DEFAULT_OBS_PORT,     // obsPort
+  TRIGGER_PORT,         // triggerPort
+  DEFAULT_BURST_FRAMES, // burstFrames
+  DEFAULT_JPEG_QUALITY, // jpegQuality
+  DEFAULT_FRAME_SIZE    // frameSize
+};
