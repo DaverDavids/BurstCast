@@ -180,14 +180,7 @@ inline bool cameraInit() {
   return true;
 }
 
-// Full deinit + reinit — required when changing resolution or XCLK at runtime.
-inline bool cameraReinit() {
-  camReady = false;
-  bufferClear();
-  esp_camera_deinit();
-  delay(100);
-  return cameraInit();
-}
+// ---- Buffer functions (must come before cameraReinit) ----
 
 inline void bufferClear() {
   for (auto& f : frameBuffer)
@@ -213,6 +206,16 @@ inline const FrameEntry* bufferNextFrame() {
   const FrameEntry* f = &frameBuffer[playbackIdx];
   playbackIdx = (playbackIdx + 1) % frameBuffer.size();
   return f;
+}
+
+// Full deinit + reinit — required when changing resolution or XCLK at runtime.
+// Defined after bufferClear() so that function is already declared.
+inline bool cameraReinit() {
+  camReady = false;
+  bufferClear();
+  esp_camera_deinit();
+  delay(100);
+  return cameraInit();
 }
 
 inline bool cameraOk()           { return camReady; }
