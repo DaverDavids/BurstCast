@@ -192,6 +192,13 @@ void setupWebServer() {
     if (webServer.hasArg("xclkMhz"))       cfg.xclkMhz       = webServer.arg("xclkMhz").toInt();
     if (webServer.hasArg("visibleSecs"))   cfg.visibleSecs   = webServer.arg("visibleSecs").toInt();
     saveConfig();
+
+    // Apply framesize to live sensor immediately — no reboot needed
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) {
+        s->set_framesize(s, (framesize_t)cfg.frameSize);
+    }
+
     webServer.send(200, "application/json", "{\"ok\":true}");
   });
 

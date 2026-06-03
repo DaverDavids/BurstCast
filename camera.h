@@ -93,8 +93,7 @@ inline bool cameraInit() {
   if (psramFound()) {
     cam.frame_size   = FRAMESIZE_UXGA;
     cam.jpeg_quality = 10;
-    cam.fb_count     = 2;
-    cam.grab_mode    = CAMERA_GRAB_LATEST;
+    cam.fb_count     = 1;
   } else {
     cam.frame_size = FRAMESIZE_SVGA;
     cam.fb_count   = 1;
