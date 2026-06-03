@@ -1,53 +1,28 @@
 // ============================================================
-//  BurstCast — ESP32-S3 WiFi-triggered burst camera → OBS RTP
-//  Board: Freenove ESP32-S3-WROOM (N16R8 clone) + OV3660
+//  BurstCast — ESP32-S3 WiFi-triggered burst cam
+//  RTSP loop server + OBS WebSocket show/hide control
+//
+//  Required libraries (Arduino Library Manager):
+//    ArduinoWebsockets  (gilmaimon)
+//    ArduinoJson        (bblanchon)
+//  Manual install:
+//    Micro-RTSP         https://github.com/geeksville/Micro-RTSP
 // ============================================================
-
-#define DEBUG_ENABLED
-
-#ifdef DEBUG_ENABLED
-  #define DBG(x)    Serial.print(x)
-  #define DBGLN(x)  Serial.println(x)
-  #define DBGF(...) Serial.printf(__VA_ARGS__)
-#else
-  #define DBG(x)
-  #define DBGLN(x)
-  #define DBGF(...)
-#endif
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <esp_camera.h>
 
-#include <Secrets.h>
+#include <Secrets.h>   // MYSSIDIOT, MYPSKIOT
 #include "config.h"
+#include "camera.h"
+#include "rtsp.h"
+#include "obsws.h"
 #include "html.h"
-
-// ============================================================
-//  Camera pin map — Freenove ESP32-S3-WROOM / N16R8 clone + OV3660
-// ============================================================
-#define CAM_PIN_PWDN    -1
-#define CAM_PIN_RESET   -1
-#define CAM_PIN_XCLK    15
-#define CAM_PIN_SIOD     4
-#define CAM_PIN_SIOC     5
-#define CAM_PIN_D7      16
-#define CAM_PIN_D6      17
-#define CAM_PIN_D5      18
-#define CAM_PIN_D4      12
-#define CAM_PIN_D3      10
-#define CAM_PIN_D2       8
-#define CAM_PIN_D1       9
-#define CAM_PIN_D0      11
-#define CAM_PIN_VSYNC    6
-#define CAM_PIN_HREF     7
-#define CAM_PIN_PCLK    13
 
 // ============================================================
 //  Globals
@@ -56,236 +31,93 @@ Preferences prefs;
 WebServer   webServer(80);
 DNSServer   dnsServer;
 WiFiUDP     udpTrigger;
-WiFiUDP     udpRtp;
 
-bool     captivePortalMode = false;
-bool     burstActive       = false;
-bool     cameraOk          = false;
-uint16_t framesSent        = 0;
-uint16_t rtpSeq            = 0;
-uint32_t rtpTimestamp      = 0;
-const uint32_t rtpSsrc     = 0xBEEFCAFE;
-uint32_t rtpTimestampStep  = 90000 / DEFAULT_FPS;
+bool captivePortalMode = false;
 
-static const uint16_t FRAME_W[] = {160,176,240,240,320,400,480,640,800,1024,1280,1280,1600};
-static const uint16_t FRAME_H[] = {120,144,176,240,240,296,320,480,600, 768, 720,1024,1200};
+// Burst timing
+static uint32_t recordStartMs  = 0;
+static uint32_t recordInterval = 0;
+static uint32_t showUntilMs    = 0;
+static bool     obsHideArmed   = false;
 
 // ============================================================
 //  Preferences
 // ============================================================
 void loadConfig() {
   prefs.begin("burstcast", true);
-  strlcpy(cfg.obsIp, prefs.getString("obsIp", "").c_str(), sizeof(cfg.obsIp));
-  cfg.obsPort     = prefs.getUShort("obsPort",     DEFAULT_OBS_PORT);
-  cfg.triggerPort = prefs.getUShort("trigPort",    TRIGGER_PORT);
-  cfg.burstFrames = prefs.getUShort("burstFrames", DEFAULT_BURST_FRAMES);
-  cfg.jpegQuality = prefs.getUChar ("jpegQuality", DEFAULT_JPEG_QUALITY);
-  cfg.frameSize   = prefs.getUChar ("frameSize",   DEFAULT_FRAME_SIZE);
-  cfg.fps         = prefs.getUChar ("fps",         DEFAULT_FPS);
-  cfg.xclkMhz     = prefs.getUChar ("xclkMhz",    DEFAULT_XCLK_MHZ);
+  strlcpy(cfg.obsWsIp,       prefs.getString("obsWsIp",   "").c_str(), sizeof(cfg.obsWsIp));
+  cfg.obsWsPort =             prefs.getUShort("obsWsPort", DEFAULT_OBS_WS_PORT);
+  strlcpy(cfg.obsWsPass,     prefs.getString("obsWsPass", "").c_str(), sizeof(cfg.obsWsPass));
+  strlcpy(cfg.obsSceneName,  prefs.getString("obsScene",  "").c_str(), sizeof(cfg.obsSceneName));
+  strlcpy(cfg.obsSourceName, prefs.getString("obsSrc",    DEFAULT_SOURCE_NAME).c_str(), sizeof(cfg.obsSourceName));
+  cfg.triggerPort  = prefs.getUShort("trigPort",    TRIGGER_PORT);
+  cfg.burstFrames  = prefs.getUShort("burstFrames", DEFAULT_BURST_FRAMES);
+  cfg.jpegQuality  = prefs.getUChar ("jpegQuality", DEFAULT_JPEG_QUALITY);
+  cfg.frameSize    = prefs.getUChar ("frameSize",   DEFAULT_FRAME_SIZE);
+  cfg.fps          = prefs.getUChar ("fps",         DEFAULT_FPS);
+  cfg.xclkMhz      = prefs.getUChar ("xclkMhz",    DEFAULT_XCLK_MHZ);
   prefs.end();
-  rtpTimestampStep = 90000 / (cfg.fps > 0 ? cfg.fps : 1);
 }
 
 void saveConfig() {
   prefs.begin("burstcast", false);
-  prefs.putString("obsIp",       cfg.obsIp);
-  prefs.putUShort("obsPort",     cfg.obsPort);
-  prefs.putUShort("trigPort",    cfg.triggerPort);
+  prefs.putString("obsWsIp",   cfg.obsWsIp);
+  prefs.putUShort("obsWsPort", cfg.obsWsPort);
+  prefs.putString("obsWsPass", cfg.obsWsPass);
+  prefs.putString("obsScene",  cfg.obsSceneName);
+  prefs.putString("obsSrc",    cfg.obsSourceName);
+  prefs.putUShort("trigPort",  cfg.triggerPort);
   prefs.putUShort("burstFrames", cfg.burstFrames);
   prefs.putUChar ("jpegQuality", cfg.jpegQuality);
   prefs.putUChar ("frameSize",   cfg.frameSize);
   prefs.putUChar ("fps",         cfg.fps);
   prefs.putUChar ("xclkMhz",     cfg.xclkMhz);
   prefs.end();
-  rtpTimestampStep = 90000 / (cfg.fps > 0 ? cfg.fps : 1);
-  DBGLN("[Config] Saved");
+  Serial.println("[Config] Saved");
 }
 
 // ============================================================
-//  Camera init
-// ============================================================
-bool initCamera() {
-  // Warn if PSRAM not detected — framebuffers won't fit in internal heap
-  if (!psramFound()) {
-    DBGLN("[Camera] WARNING: PSRAM not detected! Check Arduino board config.");
-    DBGLN("         Board must be set to a variant with PSRAM enabled.");
-    DBGLN("         e.g. 'ESP32S3 Dev Module' with PSRAM: 'OPI PSRAM'");
-  } else {
-    DBGF("[Camera] PSRAM found: %u KB free\n", ESP.getFreePsram() / 1024);
-  }
-
-  camera_config_t cam;
-  cam.ledc_channel = LEDC_CHANNEL_0;
-  cam.ledc_timer   = LEDC_TIMER_0;
-  cam.pin_d0       = CAM_PIN_D0;
-  cam.pin_d1       = CAM_PIN_D1;
-  cam.pin_d2       = CAM_PIN_D2;
-  cam.pin_d3       = CAM_PIN_D3;
-  cam.pin_d4       = CAM_PIN_D4;
-  cam.pin_d5       = CAM_PIN_D5;
-  cam.pin_d6       = CAM_PIN_D6;
-  cam.pin_d7       = CAM_PIN_D7;
-  cam.pin_xclk     = CAM_PIN_XCLK;
-  cam.pin_pclk     = CAM_PIN_PCLK;
-  cam.pin_vsync    = CAM_PIN_VSYNC;
-  cam.pin_href     = CAM_PIN_HREF;
-  cam.pin_sccb_sda = CAM_PIN_SIOD;
-  cam.pin_sccb_scl = CAM_PIN_SIOC;
-  cam.pin_pwdn     = CAM_PIN_PWDN;
-  cam.pin_reset    = CAM_PIN_RESET;
-  cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
-  cam.pixel_format = PIXFORMAT_JPEG;
-  // Always init at QVGA first; set configured size after sensor confirmed
-  cam.frame_size   = FRAMESIZE_QVGA;
-  cam.jpeg_quality = cfg.jpegQuality;
-  // PSRAM: use 2 buffers for smooth capture; fall back to 1 if no PSRAM
-  cam.fb_count     = psramFound() ? 2 : 1;
-  cam.grab_mode    = CAMERA_GRAB_LATEST;
-  // Critical: place framebuffers in PSRAM, not internal heap
-  cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
-
-  esp_err_t err = esp_camera_init(&cam);
-  if (err != ESP_OK) {
-    DBGF("[Camera] Init FAILED: 0x%x\n", err);
-    return false;
-  }
-
-  sensor_t* s = esp_camera_sensor_get();
-  if (s) {
-    DBGF("[Camera] Sensor PID: 0x%x\n", s->id.PID);
-    s->set_vflip(s, 1);    // OV3660 usually mounted inverted
-    s->set_hmirror(s, 0);
-    s->set_framesize(s, (framesize_t)cfg.frameSize);
-  }
-
-  DBGF("[Camera] OK — XCLK=%dMHz size=%d PSRAM=%s\n",
-       cfg.xclkMhz, cfg.frameSize, psramFound() ? "yes" : "NO");
-  return true;
-}
-
-// ============================================================
-//  SDP builder
-// ============================================================
-String buildSdp() {
-  uint8_t  fs = cfg.frameSize < 13 ? cfg.frameSize : 7;
-  uint16_t w  = FRAME_W[fs];
-  uint16_t h  = FRAME_H[fs];
-  String sdp;
-  sdp.reserve(300);
-  sdp += "v=0\r\n";
-  sdp += "o=- 0 0 IN IP4 "; sdp += WiFi.localIP().toString(); sdp += "\r\n";
-  sdp += "s=BurstCast\r\n";
-  sdp += "c=IN IP4 ";       sdp += WiFi.localIP().toString(); sdp += "\r\n";
-  sdp += "t=0 0\r\n";
-  sdp += "m=video ";        sdp += String(cfg.obsPort); sdp += " RTP/AVP 26\r\n";
-  sdp += "a=rtpmap:26 JPEG/90000\r\n";
-  sdp += "a=fmtp:26 width="; sdp += String(w); sdp += ";height="; sdp += String(h); sdp += "\r\n";
-  sdp += "a=framerate:";    sdp += String(cfg.fps); sdp += "\r\n";
-  return sdp;
-}
-
-// ============================================================
-//  WiFi
-// ============================================================
-void startCaptivePortal() {
-  captivePortalMode = true;
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID);
-  dnsServer.start(53, "*", WiFi.softAPIP());
-  DBGF("[WiFi] Captive portal: %s\n", WiFi.softAPIP().toString().c_str());
-}
-
-void connectWiFi() {
-  WiFi.setHostname(HOSTNAME);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(MYSSIDIOT, MYPSKIOT);
-  DBGF("[WiFi] Connecting to %s", MYSSIDIOT);
-  unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
-    delay(250); DBG(".");
-  }
-  DBG("\n");
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFi.setTxPower(WIFI_TX_POWER);
-    DBGF("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-  } else {
-    DBGLN("[WiFi] Failed — captive portal");
-    startCaptivePortal();
-  }
-}
-
-void setupMDNS() {
-  if (MDNS.begin(HOSTNAME)) { MDNS.addService("http", "tcp", 80); }
-}
-
-void setupOTA() {
-  ArduinoOTA.setHostname(HOSTNAME);
-  ArduinoOTA.onError([](ota_error_t e) { DBGF("[OTA] Error %u\n", e); });
-  ArduinoOTA.begin();
-}
-
-// ============================================================
-//  RTP/JPEG packetizer (RFC 2435, PT=26)
-// ============================================================
-#define RTP_HDR_LEN     12
-#define JPEG_HDR_LEN     8
-#define MAX_RTP_PAYLOAD 1400
-#define PKT_BUF_LEN     (RTP_HDR_LEN + JPEG_HDR_LEN + MAX_RTP_PAYLOAD)
-
-void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
-  if (cfg.obsIp[0] == '\0') return;
-  static uint8_t pkt[PKT_BUF_LEN];
-  size_t offset = 0;
-  while (offset < jpegLen) {
-    size_t payloadLen = min((size_t)MAX_RTP_PAYLOAD, jpegLen - offset);
-    bool last = (offset + payloadLen >= jpegLen);
-    pkt[0]  = 0x80;
-    pkt[1]  = (last ? 0x80 : 0x00) | 26;
-    pkt[2]  = (rtpSeq >> 8) & 0xFF;        pkt[3]  = rtpSeq & 0xFF;
-    pkt[4]  = (rtpTimestamp >> 24) & 0xFF;  pkt[5]  = (rtpTimestamp >> 16) & 0xFF;
-    pkt[6]  = (rtpTimestamp >>  8) & 0xFF;  pkt[7]  = rtpTimestamp & 0xFF;
-    pkt[8]  = (rtpSsrc >> 24) & 0xFF;      pkt[9]  = (rtpSsrc >> 16) & 0xFF;
-    pkt[10] = (rtpSsrc >>  8) & 0xFF;      pkt[11] = rtpSsrc & 0xFF;
-    pkt[12] = 0;
-    pkt[13] = (offset >> 16) & 0xFF; pkt[14] = (offset >> 8) & 0xFF; pkt[15] = offset & 0xFF;
-    pkt[16] = 1; pkt[17] = cfg.jpegQuality; pkt[18] = 0; pkt[19] = 0;
-    memcpy(pkt + RTP_HDR_LEN + JPEG_HDR_LEN, jpegData + offset, payloadLen);
-    udpRtp.beginPacket(cfg.obsIp, cfg.obsPort);
-    udpRtp.write(pkt, RTP_HDR_LEN + JPEG_HDR_LEN + payloadLen);
-    udpRtp.endPacket();
-    rtpSeq++;
-    offset += payloadLen;
-  }
-  rtpTimestamp += rtpTimestampStep;
-}
-
-// ============================================================
-//  Burst
+//  Burst state machine
 // ============================================================
 void startBurst() {
-  if (burstActive || !cameraOk) return;
-  burstActive = true;
-  framesSent  = 0;
-  DBGLN("[Burst] Started");
+  if (burstState == STATE_RECORDING) return;
+  if (!cameraOk()) { Serial.println("[Burst] Camera not ready"); return; }
+  Serial.println("[Burst] Recording started");
+  bufferClear();
+  burstState      = STATE_RECORDING;
+  recordStartMs   = millis();
+  recordInterval  = cfg.fps > 0 ? 1000UL / cfg.fps : 66;
 }
 
-void handleBurst() {
-  if (!burstActive) return;
-  static unsigned long lastFrameMs = 0;
-  unsigned long interval = (cfg.fps > 0) ? (1000UL / cfg.fps) : 66;
-  if (millis() - lastFrameMs < interval) return;
-  lastFrameMs = millis();
-  if (framesSent >= cfg.burstFrames) {
-    burstActive = false;
-    DBGF("[Burst] Done — %u frames\n", framesSent);
+void handleRecording() {
+  if (burstState != STATE_RECORDING) return;
+  static uint32_t lastCapMs = 0;
+  if (millis() - lastCapMs < recordInterval) return;
+  lastCapMs = millis();
+
+  if (bufferFrameCount() >= cfg.burstFrames) {
+    // Recording done
+    burstState = STATE_LOOPING;
+    float dur  = (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
+    Serial.printf("[Burst] Done — %u frames, %.1fs\n", (unsigned)bufferFrameCount(), dur);
+
+    // OBS: show source, schedule hide
+    if (obsWsReady()) {
+      obsSetSourceVisible(true);
+      showUntilMs  = millis() + (uint32_t)(dur * 1000);
+      obsHideArmed = true;
+    }
     return;
   }
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) { DBGLN("[Camera] Frame grab failed"); return; }
-  sendRtpJpeg(fb->buf, fb->len);
-  esp_camera_fb_return(fb);
-  framesSent++;
+  bufferAppendFrame();
+}
+
+void handleObsHide() {
+  if (!obsHideArmed) return;
+  if (millis() >= showUntilMs) {
+    obsSetSourceVisible(false);
+    obsHideArmed = false;
+  }
 }
 
 // ============================================================
@@ -297,7 +129,7 @@ void handleTrigger() {
   char buf[32];
   int n = min(pktSize, (int)(sizeof(buf) - 1));
   udpTrigger.read(buf, n); buf[n] = '\0';
-  DBGF("[Trigger] UDP: %s\n", buf);
+  Serial.printf("[Trigger] UDP: %s\n", buf);
   startBurst();
   udpTrigger.beginPacket(udpTrigger.remoteIP(), udpTrigger.remotePort());
   udpTrigger.write((const uint8_t*)ACK_MSG, strlen(ACK_MSG));
@@ -305,10 +137,39 @@ void handleTrigger() {
 }
 
 // ============================================================
+//  WiFi
+// ============================================================
+void startCaptivePortal() {
+  captivePortalMode = true;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID);
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  Serial.printf("[WiFi] Captive portal: %s\n", WiFi.softAPIP().toString().c_str());
+}
+
+void connectWiFi() {
+  WiFi.setHostname(HOSTNAME);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(MYSSIDIOT, MYPSKIOT);
+  Serial.printf("[WiFi] Connecting to %s", MYSSIDIOT);
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
+    delay(250); Serial.print(".");
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFi.setTxPower(WIFI_TX_POWER);
+    Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("[WiFi] Failed — captive portal");
+    startCaptivePortal();
+  }
+}
+
+// ============================================================
 //  Web server
 // ============================================================
 void setupWebServer() {
-
   webServer.onNotFound([]() {
     if (captivePortalMode) {
       webServer.sendHeader("Location", "http://192.168.4.1/");
@@ -319,75 +180,77 @@ void setupWebServer() {
   });
 
   webServer.on("/", HTTP_GET, []() {
-    if (captivePortalMode)
-      webServer.send(200, "text/html", FPSTR(CAPTIVE_FORM));
-    else
-      webServer.send(200, "text/html", buildConfigPage(cameraOk));
+    webServer.send(200, "text/html",
+      captivePortalMode ? FPSTR(CAPTIVE_FORM) : buildConfigPage(cameraOk()));
   });
 
   webServer.on("/save", HTTP_POST, []() {
-    if (webServer.hasArg("obsIp"))       strlcpy(cfg.obsIp, webServer.arg("obsIp").c_str(), sizeof(cfg.obsIp));
-    if (webServer.hasArg("obsPort"))     cfg.obsPort     = (uint16_t)webServer.arg("obsPort").toInt();
-    if (webServer.hasArg("trigPort"))    cfg.triggerPort = (uint16_t)webServer.arg("trigPort").toInt();
-    if (webServer.hasArg("burstFrames")) cfg.burstFrames = (uint16_t)webServer.arg("burstFrames").toInt();
-    if (webServer.hasArg("jpegQuality")) cfg.jpegQuality = (uint8_t) webServer.arg("jpegQuality").toInt();
-    if (webServer.hasArg("frameSize"))   cfg.frameSize   = (uint8_t) webServer.arg("frameSize").toInt();
-    if (webServer.hasArg("fps"))         cfg.fps         = (uint8_t) webServer.arg("fps").toInt();
-    if (webServer.hasArg("xclkMhz"))     cfg.xclkMhz     = (uint8_t) webServer.arg("xclkMhz").toInt();
+    if (webServer.hasArg("obsWsIp"))       strlcpy(cfg.obsWsIp,       webServer.arg("obsWsIp").c_str(),       sizeof(cfg.obsWsIp));
+    if (webServer.hasArg("obsWsPort"))     cfg.obsWsPort     = webServer.arg("obsWsPort").toInt();
+    if (webServer.hasArg("obsWsPass"))     strlcpy(cfg.obsWsPass,     webServer.arg("obsWsPass").c_str(),     sizeof(cfg.obsWsPass));
+    if (webServer.hasArg("obsSceneName"))  strlcpy(cfg.obsSceneName,  webServer.arg("obsSceneName").c_str(),  sizeof(cfg.obsSceneName));
+    if (webServer.hasArg("obsSourceName")) strlcpy(cfg.obsSourceName, webServer.arg("obsSourceName").c_str(), sizeof(cfg.obsSourceName));
+    if (webServer.hasArg("trigPort"))      cfg.triggerPort   = webServer.arg("trigPort").toInt();
+    if (webServer.hasArg("burstFrames"))   cfg.burstFrames   = webServer.arg("burstFrames").toInt();
+    if (webServer.hasArg("jpegQuality"))   cfg.jpegQuality   = webServer.arg("jpegQuality").toInt();
+    if (webServer.hasArg("frameSize"))     cfg.frameSize     = webServer.arg("frameSize").toInt();
+    if (webServer.hasArg("fps"))           cfg.fps           = webServer.arg("fps").toInt();
+    if (webServer.hasArg("xclkMhz"))       cfg.xclkMhz       = webServer.arg("xclkMhz").toInt();
     saveConfig();
     webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
   webServer.on("/trigger", HTTP_GET, []() {
     startBurst();
-    char resp[64];
-    snprintf(resp, sizeof(resp), "{\"ok\":%s,\"camOk\":%s}",
-      cameraOk ? "true" : "false", cameraOk ? "true" : "false");
-    webServer.send(200, "application/json", resp);
+    webServer.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  webServer.on("/clearbuffer", HTTP_GET, []() {
+    bufferClear();
+    burstState = STATE_IDLE;
+    webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
   webServer.on("/status", HTTP_GET, []() {
-    char json[320];
+    const char* stateStr =
+      burstState == STATE_RECORDING ? "Recording" :
+      burstState == STATE_LOOPING   ? "Looping" : "Idle";
+    char json[256];
     snprintf(json, sizeof(json),
-      "{\"burst\":%s,\"framesSent\":%u,\"ip\":\"%s\",\"rssi\":%d,\"camOk\":%s}",
-      burstActive ? "true" : "false",
-      (unsigned)framesSent,
+      "{\"state\":\"%s\",\"frames\":%u,\"ip\":\"%s\",\"rssi\":%d,\"camOk\":%s,\"obsWs\":%s}",
+      stateStr,
+      (unsigned)bufferFrameCount(),
       WiFi.localIP().toString().c_str(),
       WiFi.RSSI(),
-      cameraOk ? "true" : "false");
+      cameraOk() ? "true" : "false",
+      obsWsReady() ? "true" : "false");
     webServer.send(200, "application/json", json);
   });
 
-  webServer.on("/stream.sdp", HTTP_GET, []() {
-    webServer.sendHeader("Content-Disposition", "attachment; filename=burstcast.sdp");
-    webServer.send(200, "application/sdp", buildSdp());
-  });
-
   webServer.on("/cam.jpg", HTTP_GET, []() {
-    if (!cameraOk) { webServer.send(503, "text/plain", "Camera not available"); return; }
+    if (!cameraOk()) { webServer.send(503, "text/plain", "Camera not ready"); return; }
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb)      { webServer.send(503, "text/plain", "Frame grab failed"); return; }
+    if (!fb)       { webServer.send(503, "text/plain", "Frame grab failed"); return; }
     webServer.sendHeader("Cache-Control", "no-cache, no-store");
-    webServer.sendHeader("Access-Control-Allow-Origin", "*");
     webServer.send_P(200, "image/jpeg", (const char*)fb->buf, fb->len);
     esp_camera_fb_return(fb);
   });
 
   webServer.on("/stream", HTTP_GET, []() {
-    if (!cameraOk) { webServer.send(503, "text/plain", "Camera not available"); return; }
+    if (!cameraOk()) { webServer.send(503, "text/plain", "Camera not ready"); return; }
     WiFiClient client = webServer.client();
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
     client.println("Cache-Control: no-cache");
     client.println("Connection: close");
     client.println();
-    unsigned long lastFrame = 0;
-    unsigned long interval  = (cfg.fps > 0) ? (1000UL / cfg.fps) : 66;
+    uint32_t interval = cfg.fps > 0 ? 1000UL / cfg.fps : 66;
+    uint32_t lastF = 0;
     while (client.connected()) {
       webServer.handleClient();
       ArduinoOTA.handle();
-      if (millis() - lastFrame < interval) { delay(2); continue; }
-      lastFrame = millis();
+      if (millis() - lastF < interval) { delay(2); continue; }
+      lastF = millis();
       camera_fb_t* fb = esp_camera_fb_get();
       if (!fb) continue;
       client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
@@ -395,48 +258,53 @@ void setupWebServer() {
       client.print("\r\n");
       esp_camera_fb_return(fb);
     }
-    DBGLN("[Stream] Client disconnected");
   });
 
   webServer.begin();
-  DBGLN("[Web] Server ready");
-}
-
-void checkWiFi() {
-  static unsigned long lastCheck = 0;
-  if (captivePortalMode || millis() - lastCheck < 10000) return;
-  lastCheck = millis();
-  if (WiFi.status() != WL_CONNECTED) { WiFi.reconnect(); }
+  Serial.println("[Web] Server ready");
 }
 
 // ============================================================
 //  setup / loop
 // ============================================================
 void setup() {
-#ifdef DEBUG_ENABLED
   Serial.begin(115200);
   delay(500);
-#endif
-  DBGLN("\n[BurstCast] Boot");
+  Serial.println("\n[BurstCast] Boot");
   loadConfig();
   connectWiFi();
   if (!captivePortalMode) {
-    setupMDNS();
-    setupOTA();
+    MDNS.begin(HOSTNAME);
+    MDNS.addService("http", "tcp", 80);
+    ArduinoOTA.setHostname(HOSTNAME);
+    ArduinoOTA.begin();
     udpTrigger.begin(cfg.triggerPort);
+    rtspBegin();
+    obsWsBegin();
   }
   setupWebServer();
-  cameraOk = initCamera();
-  DBGF("[BurstCast] Ready — camera %s\n", cameraOk ? "OK" : "FAILED");
+  if (!cameraInit()) {
+    Serial.println("[BurstCast] Camera FAILED");
+  }
+  Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n",
+    WiFi.localIP().toString().c_str());
 }
 
 void loop() {
-  if (captivePortalMode) dnsServer.processNextRequest();
+  if (captivePortalMode) { dnsServer.processNextRequest(); }
   webServer.handleClient();
   if (!captivePortalMode) {
     ArduinoOTA.handle();
+    rtspHandle();
     handleTrigger();
-    handleBurst();
-    checkWiFi();
+    handleRecording();
+    handleObsHide();
+    obsWsHandle();
+    // WiFi watchdog
+    static uint32_t lastWifi = 0;
+    if (millis() - lastWifi > 10000) {
+      lastWifi = millis();
+      if (WiFi.status() != WL_CONNECTED) WiFi.reconnect();
+    }
   }
 }

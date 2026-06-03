@@ -1,42 +1,70 @@
 #pragma once
+
 // ============================================================
-//  config.h — BurstCast shared config struct + single instance
-//  Include this ONCE before any other BurstCast headers.
+//  BurstCast — runtime config (saved to NVS via Preferences)
 // ============================================================
 
-#define HOSTNAME         "burstcast"
-#define WIFI_TX_POWER    WIFI_POWER_11dBm
-#define WIFI_TIMEOUT_MS  15000
-#define TRIGGER_PORT     5555
-#define ACK_MSG          "BURSTCAST_ACK"
-#define AP_SSID          "BurstCast-Setup"
+#define HOSTNAME          "burstcast"
+#define AP_SSID           "BurstCast-Setup"
+#define WIFI_TIMEOUT_MS   10000
+#define WIFI_TX_POWER     WIFI_POWER_19_5dBm
+#define ACK_MSG           "OK"
 
-#define DEFAULT_BURST_FRAMES  60
-#define DEFAULT_OBS_PORT      8554
-#define DEFAULT_FRAME_SIZE    7     // FRAMESIZE_VGA = 7
-#define DEFAULT_JPEG_QUALITY  12
+#define TRIGGER_PORT        5005
+#define DEFAULT_OBS_IP      ""
+#define DEFAULT_OBS_WS_PORT 4455
+#define DEFAULT_OBS_WS_PASS ""
+#define DEFAULT_SCENE_NAME  ""
+#define DEFAULT_SOURCE_NAME "BurstCast"
+
+#define DEFAULT_BURST_FRAMES  45      // frames to record per trigger
 #define DEFAULT_FPS           15
+#define DEFAULT_JPEG_QUALITY  12      // 0=best, 63=worst
+#define DEFAULT_FRAME_SIZE    6       // FRAMESIZE_VGA
 #define DEFAULT_XCLK_MHZ      20
 
+// States
+typedef enum {
+  STATE_IDLE,        // no frames recorded yet, RTSP sends black frame
+  STATE_RECORDING,   // capturing frames into PSRAM buffer
+  STATE_LOOPING,     // serving PSRAM buffer in a loop over RTSP
+} BurstState;
+
 struct Config {
-  char     obsIp[32];
-  uint16_t obsPort;
+  // Network / OBS RTP (legacy, unused in new arch but kept for compat)
+  char     obsIp[40];        // not used for RTSP push, kept for future
+  uint16_t obsPort;          // not used
   uint16_t triggerPort;
+
+  // OBS WebSocket
+  char     obsWsIp[40];      // OBS machine IP
+  uint16_t obsWsPort;
+  char     obsWsPass[64];
+  char     obsSceneName[64];
+  char     obsSourceName[64];
+
+  // Camera
   uint16_t burstFrames;
   uint8_t  jpegQuality;
   uint8_t  frameSize;
-  uint8_t  fps;          // target capture FPS (also sets RTP timestamp step)
-  uint8_t  xclkMhz;     // camera XCLK frequency in MHz (8, 16, 20, 24)
+  uint8_t  fps;
+  uint8_t  xclkMhz;
 };
 
-// Single global instance — inline ensures one definition across all TUs (C++17)
 inline Config cfg = {
-  "",                   // obsIp
-  DEFAULT_OBS_PORT,     // obsPort
-  TRIGGER_PORT,         // triggerPort
-  DEFAULT_BURST_FRAMES, // burstFrames
-  DEFAULT_JPEG_QUALITY, // jpegQuality
-  DEFAULT_FRAME_SIZE,   // frameSize
-  DEFAULT_FPS,          // fps
-  DEFAULT_XCLK_MHZ      // xclkMhz
+  .obsIp         = "",
+  .obsPort       = 0,
+  .triggerPort   = TRIGGER_PORT,
+  .obsWsIp       = "",
+  .obsWsPort     = DEFAULT_OBS_WS_PORT,
+  .obsWsPass     = "",
+  .obsSceneName  = "",
+  .obsSourceName = DEFAULT_SOURCE_NAME,
+  .burstFrames   = DEFAULT_BURST_FRAMES,
+  .jpegQuality   = DEFAULT_JPEG_QUALITY,
+  .frameSize     = DEFAULT_FRAME_SIZE,
+  .fps           = DEFAULT_FPS,
+  .xclkMhz       = DEFAULT_XCLK_MHZ,
 };
+
+inline BurstState burstState = STATE_IDLE;
