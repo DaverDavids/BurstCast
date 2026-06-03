@@ -1,7 +1,12 @@
 #pragma once
 // ============================================================
 //  obsws.h — OBS WebSocket 5.x client
-//  Requires: ArduinoWebsockets + ArduinoJson (Library Manager)
+//  OBS WS5 op codes:
+//    0 = Hello        (server -> client)
+//    1 = Identify     (client -> server)
+//    2 = Identified   (server -> client, auth success)
+//    6 = Request      (client -> server)
+//    7 = RequestResponse (server -> client)
 // ============================================================
 #include <ArduinoWebsockets.h>
 #include <ArduinoJson.h>
@@ -65,9 +70,10 @@ static void obsOnMessage(WebsocketsMessage msg) {
   StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, msg.data()) != DeserializationError::Ok) return;
   int op = doc["op"] | -1;
+  Serial.printf("[OBS] op=%d\n", op);  // debug: remove once auth is confirmed working
 
-  if (op == 2) {
-    // Hello
+  if (op == 0) {
+    // Hello — send Identify with optional auth
     JsonObject d = doc["d"];
     StaticJsonDocument<256> ident;
     ident["op"] = 1;
@@ -81,22 +87,25 @@ static void obsOnMessage(WebsocketsMessage msg) {
     }
     String out; serializeJson(ident, out);
     obsSendRaw(out);
+    Serial.println("[OBS] Sent Identify");
   }
-  else if (op == 5) {
-    // Identified
+  else if (op == 2) {
+    // Identified — auth accepted
     Serial.println("[OBS] Authenticated");
     obsWsConnected = true;
     if (cfg.obsSceneName[0] && cfg.obsSourceName[0]) obsGetSceneItemId();
   }
   else if (op == 7) {
     const char* reqId = doc["d"]["requestId"] | "";
+    bool ok = doc["d"]["requestStatus"]["result"] | false;
     if (strcmp(reqId, "getid") == 0) {
-      int32_t id = doc["d"]["responseData"]["sceneItemId"] | -1;
-      if (id >= 0) {
+      if (ok) {
+        int32_t id = doc["d"]["responseData"]["sceneItemId"] | -1;
         obsSceneItemId = id;
         Serial.printf("[OBS] Scene item ID '%s': %d\n", cfg.obsSourceName, id);
       } else {
-        Serial.println("[OBS] WARNING: source not found — check Scene/Source names");
+        int code = doc["d"]["requestStatus"]["code"] | 0;
+        Serial.printf("[OBS] GetSceneItemId failed (code %d) — check Scene/Source names\n", code);
       }
     }
   }
@@ -125,7 +134,6 @@ inline void obsWsBegin() {
 inline void obsWsHandle() {
   if (!obsWsEverStarted) return;
   obsWs.poll();
-  // Only attempt reconnect if socket is actually gone
   static uint32_t lastTry = 0;
   if (!obsWs.available() && cfg.obsWsIp[0] && millis() - lastTry > 10000) {
     lastTry = millis();
