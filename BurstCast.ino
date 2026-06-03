@@ -30,9 +30,7 @@
 #include "html.h"
 
 // ============================================================
-//  Camera pin map — Freenove ESP32-S3-WROOM / N16R8 clone
-//  OV3660 sensor, dual USB-C
-//  If probe still fails, swap SIOD/SIOC: try 1/2 or 8/9
+//  Camera pin map — Freenove ESP32-S3-WROOM / N16R8 clone + OV3660
 // ============================================================
 #define CAM_PIN_PWDN    -1
 #define CAM_PIN_RESET   -1
@@ -108,6 +106,15 @@ void saveConfig() {
 //  Camera init
 // ============================================================
 bool initCamera() {
+  // Warn if PSRAM not detected — framebuffers won't fit in internal heap
+  if (!psramFound()) {
+    DBGLN("[Camera] WARNING: PSRAM not detected! Check Arduino board config.");
+    DBGLN("         Board must be set to a variant with PSRAM enabled.");
+    DBGLN("         e.g. 'ESP32S3 Dev Module' with PSRAM: 'OPI PSRAM'");
+  } else {
+    DBGF("[Camera] PSRAM found: %u KB free\n", ESP.getFreePsram() / 1024);
+  }
+
   camera_config_t cam;
   cam.ledc_channel = LEDC_CHANNEL_0;
   cam.ledc_timer   = LEDC_TIMER_0;
@@ -129,11 +136,14 @@ bool initCamera() {
   cam.pin_reset    = CAM_PIN_RESET;
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
-  // Init at QVGA; set configured size after sensor is known
+  // Always init at QVGA first; set configured size after sensor confirmed
   cam.frame_size   = FRAMESIZE_QVGA;
   cam.jpeg_quality = cfg.jpegQuality;
-  cam.fb_count     = 2;
+  // PSRAM: use 2 buffers for smooth capture; fall back to 1 if no PSRAM
+  cam.fb_count     = psramFound() ? 2 : 1;
   cam.grab_mode    = CAMERA_GRAB_LATEST;
+  // Critical: place framebuffers in PSRAM, not internal heap
+  cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
   esp_err_t err = esp_camera_init(&cam);
   if (err != ESP_OK) {
@@ -144,13 +154,13 @@ bool initCamera() {
   sensor_t* s = esp_camera_sensor_get();
   if (s) {
     DBGF("[Camera] Sensor PID: 0x%x\n", s->id.PID);
-    // OV3660 is typically mounted upside-down on these modules
-    s->set_vflip(s, 1);
+    s->set_vflip(s, 1);    // OV3660 usually mounted inverted
     s->set_hmirror(s, 0);
     s->set_framesize(s, (framesize_t)cfg.frameSize);
   }
 
-  DBGF("[Camera] OK — XCLK=%dMHz size=%d\n", cfg.xclkMhz, cfg.frameSize);
+  DBGF("[Camera] OK — XCLK=%dMHz size=%d PSRAM=%s\n",
+       cfg.xclkMhz, cfg.frameSize, psramFound() ? "yes" : "NO");
   return true;
 }
 
@@ -353,7 +363,6 @@ void setupWebServer() {
     webServer.send(200, "application/sdp", buildSdp());
   });
 
-  // Single JPEG snapshot — used by web UI <img> refresh
   webServer.on("/cam.jpg", HTTP_GET, []() {
     if (!cameraOk) { webServer.send(503, "text/plain", "Camera not available"); return; }
     camera_fb_t* fb = esp_camera_fb_get();
@@ -364,7 +373,6 @@ void setupWebServer() {
     esp_camera_fb_return(fb);
   });
 
-  // Multipart MJPEG — open in browser tab or VLC: http://<ip>/stream
   webServer.on("/stream", HTTP_GET, []() {
     if (!cameraOk) { webServer.send(503, "text/plain", "Camera not available"); return; }
     WiFiClient client = webServer.client();
