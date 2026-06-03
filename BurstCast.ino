@@ -1,5 +1,5 @@
 // ============================================================
-//  BurstCast — ESP32-S3 WiFi-triggered burst camera → OBS RTSP
+//  BurstCast — ESP32-S3 WiFi-triggered burst camera → OBS RTP
 //  Board: ESP32-S3 with OV2640 (or compatible) camera module
 // ============================================================
 
@@ -7,10 +7,10 @@
 #define DEBUG_ENABLED
 
 #ifdef DEBUG_ENABLED
-  #define DBG(x)   Serial.print(x)
-  #define DBGLN(x) Serial.println(x)
-  #define DBGF(...)Serial.printf(__VA_ARGS__)
-else
+  #define DBG(x)    Serial.print(x)
+  #define DBGLN(x)  Serial.println(x)
+  #define DBGF(...) Serial.printf(__VA_ARGS__)
+#else
   #define DBG(x)
   #define DBGLN(x)
   #define DBGF(...)
@@ -32,93 +32,80 @@ else
 // Expects: #define MYSSIDIOT "your_ssid"
 //          #define MYPSKIOT  "your_password"
 
-// ---- Config ----
+// ---- Shared config struct (must come before html.h) ----
+#include "config.h"
 #include "html.h"
 
 // ============================================================
-//  Constants & defaults
+//  Camera pin map (XIAO ESP32-S3 Sense)
+//  Adjust CAM_PIN_* defines below for your specific module
 // ============================================================
-#define HOSTNAME        "burstcast"
-#define WIFI_TX_DBM     11          // dBm after connect
-#define WIFI_TIMEOUT_MS 15000       // ms before falling back to AP/captive portal
-#define TRIGGER_PORT    5555        // UDP port this device listens on for trigger
-#define ACK_MSG         "BURSTCAST_ACK"
-#define AP_SSID         "BurstCast-Setup"
-
-// Default configurable values (overridden by Preferences)
-#define DEFAULT_BURST_FRAMES  60
-#define DEFAULT_OBS_PORT      8554  // OBS RTSP ingest port
-#define DEFAULT_FRAME_SIZE    FRAMESIZE_VGA
-#define DEFAULT_JPEG_QUALITY  12    // lower = better (OV2640 range 0-63)
-
-// ---- Camera pin map (XIAO ESP32-S3 Sense / AI-Thinker compatible) ----
-// Adjust to your specific module if needed
 #define CAM_PIN_PWDN    -1
 #define CAM_PIN_RESET   -1
-#define CAM_PIN_XCLK     10
-#define CAM_PIN_SIOD     40
-#define CAM_PIN_SIOC     39
-#define CAM_PIN_D7       48
-#define CAM_PIN_D6       11
-#define CAM_PIN_D5       12
-#define CAM_PIN_D4       14
-#define CAM_PIN_D3       16
-#define CAM_PIN_D2        18
-#define CAM_PIN_D1       17
-#define CAM_PIN_D0        15
-#define CAM_PIN_VSYNC    38
-#define CAM_PIN_HREF     47
-#define CAM_PIN_PCLK     13
+#define CAM_PIN_XCLK    10
+#define CAM_PIN_SIOD    40
+#define CAM_PIN_SIOC    39
+#define CAM_PIN_D7      48
+#define CAM_PIN_D6      11
+#define CAM_PIN_D5      12
+#define CAM_PIN_D4      14
+#define CAM_PIN_D3      16
+#define CAM_PIN_D2      18
+#define CAM_PIN_D1      17
+#define CAM_PIN_D0      15
+#define CAM_PIN_VSYNC   38
+#define CAM_PIN_HREF    47
+#define CAM_PIN_PCLK    13
 
 // ============================================================
 //  Globals
 // ============================================================
-Preferences  prefs;
-WebServer    webServer(80);
-DNSServer    dnsServer;
-WiFiUDP      udpTrigger;
-WiFiUDP      udpRtp;          // RTP stream to OBS
+Preferences prefs;
+WebServer   webServer(80);
+DNSServer   dnsServer;
+WiFiUDP     udpTrigger;
+WiFiUDP     udpRtp;
 
-// Runtime config (loaded from flash, editable via web UI)
-struct Config {
-  char obsIp[32]       = "";
-  uint16_t obsPort     = DEFAULT_OBS_PORT;
-  uint16_t triggerPort = TRIGGER_PORT;
-  uint16_t burstFrames = DEFAULT_BURST_FRAMES;
-  uint8_t  jpegQuality = DEFAULT_JPEG_QUALITY;
-  uint8_t  frameSize   = DEFAULT_FRAME_SIZE;   // sensor_t framesize enum
-} cfg;
+// Config instance (extern declared in config.h)
+Config cfg = {
+  "",                    // obsIp
+  DEFAULT_OBS_PORT,      // obsPort
+  TRIGGER_PORT,          // triggerPort
+  DEFAULT_BURST_FRAMES,  // burstFrames
+  DEFAULT_JPEG_QUALITY,  // jpegQuality
+  DEFAULT_FRAME_SIZE     // frameSize
+};
 
 bool     captivePortalMode = false;
 bool     burstActive       = false;
 uint16_t framesSent        = 0;
 uint16_t rtpSeq            = 0;
 uint32_t rtpTimestamp      = 0;
-uint32_t rtpSsrc           = 0xBEEFCAFE;
+const uint32_t rtpSsrc     = 0xBEEFCAFE;
 
 // ============================================================
 //  Preferences helpers
 // ============================================================
 void loadConfig() {
   prefs.begin("burstcast", true);
-  strlcpy(cfg.obsIp,       prefs.getString("obsIp",      "").c_str(), sizeof(cfg.obsIp));
-  cfg.obsPort      = prefs.getUShort("obsPort",     DEFAULT_OBS_PORT);
-  cfg.triggerPort  = prefs.getUShort("trigPort",    TRIGGER_PORT);
-  cfg.burstFrames  = prefs.getUShort("burstFrames", DEFAULT_BURST_FRAMES);
-  cfg.jpegQuality  = prefs.getUChar("jpegQuality",  DEFAULT_JPEG_QUALITY);
-  cfg.frameSize    = prefs.getUChar("frameSize",    DEFAULT_FRAME_SIZE);
+  strlcpy(cfg.obsIp, prefs.getString("obsIp", "").c_str(), sizeof(cfg.obsIp));
+  cfg.obsPort     = prefs.getUShort("obsPort",     DEFAULT_OBS_PORT);
+  cfg.triggerPort = prefs.getUShort("trigPort",    TRIGGER_PORT);
+  cfg.burstFrames = prefs.getUShort("burstFrames", DEFAULT_BURST_FRAMES);
+  cfg.jpegQuality = prefs.getUChar ("jpegQuality", DEFAULT_JPEG_QUALITY);
+  cfg.frameSize   = prefs.getUChar ("frameSize",   DEFAULT_FRAME_SIZE);
   prefs.end();
   DBGLN("[Config] Loaded from flash");
 }
 
 void saveConfig() {
   prefs.begin("burstcast", false);
-  prefs.putString("obsIp",      cfg.obsIp);
-  prefs.putUShort("obsPort",    cfg.obsPort);
-  prefs.putUShort("trigPort",   cfg.triggerPort);
-  prefs.putUShort("burstFrames",cfg.burstFrames);
-  prefs.putUChar("jpegQuality", cfg.jpegQuality);
-  prefs.putUChar("frameSize",   cfg.frameSize);
+  prefs.putString("obsIp",       cfg.obsIp);
+  prefs.putUShort("obsPort",     cfg.obsPort);
+  prefs.putUShort("trigPort",    cfg.triggerPort);
+  prefs.putUShort("burstFrames", cfg.burstFrames);
+  prefs.putUChar ("jpegQuality", cfg.jpegQuality);
+  prefs.putUChar ("frameSize",   cfg.frameSize);
   prefs.end();
   DBGLN("[Config] Saved to flash");
 }
@@ -127,33 +114,33 @@ void saveConfig() {
 //  Camera init
 // ============================================================
 bool initCamera() {
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer   = LEDC_TIMER_0;
-  config.pin_d0       = CAM_PIN_D0;
-  config.pin_d1       = CAM_PIN_D1;
-  config.pin_d2       = CAM_PIN_D2;
-  config.pin_d3       = CAM_PIN_D3;
-  config.pin_d4       = CAM_PIN_D4;
-  config.pin_d5       = CAM_PIN_D5;
-  config.pin_d6       = CAM_PIN_D6;
-  config.pin_d7       = CAM_PIN_D7;
-  config.pin_xclk     = CAM_PIN_XCLK;
-  config.pin_pclk     = CAM_PIN_PCLK;
-  config.pin_vsync    = CAM_PIN_VSYNC;
-  config.pin_href     = CAM_PIN_HREF;
-  config.pin_sccb_sda = CAM_PIN_SIOD;
-  config.pin_sccb_scl = CAM_PIN_SIOC;
-  config.pin_pwdn     = CAM_PIN_PWDN;
-  config.pin_reset    = CAM_PIN_RESET;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size   = (framesize_t)cfg.frameSize;
-  config.jpeg_quality = cfg.jpegQuality;
-  config.fb_count     = 2;
-  config.grab_mode    = CAMERA_GRAB_LATEST;
+  camera_config_t cam;
+  cam.ledc_channel = LEDC_CHANNEL_0;
+  cam.ledc_timer   = LEDC_TIMER_0;
+  cam.pin_d0       = CAM_PIN_D0;
+  cam.pin_d1       = CAM_PIN_D1;
+  cam.pin_d2       = CAM_PIN_D2;
+  cam.pin_d3       = CAM_PIN_D3;
+  cam.pin_d4       = CAM_PIN_D4;
+  cam.pin_d5       = CAM_PIN_D5;
+  cam.pin_d6       = CAM_PIN_D6;
+  cam.pin_d7       = CAM_PIN_D7;
+  cam.pin_xclk     = CAM_PIN_XCLK;
+  cam.pin_pclk     = CAM_PIN_PCLK;
+  cam.pin_vsync    = CAM_PIN_VSYNC;
+  cam.pin_href     = CAM_PIN_HREF;
+  cam.pin_sccb_sda = CAM_PIN_SIOD;
+  cam.pin_sccb_scl = CAM_PIN_SIOC;
+  cam.pin_pwdn     = CAM_PIN_PWDN;
+  cam.pin_reset    = CAM_PIN_RESET;
+  cam.xclk_freq_hz = 20000000;
+  cam.pixel_format = PIXFORMAT_JPEG;
+  cam.frame_size   = (framesize_t)cfg.frameSize;
+  cam.jpeg_quality = cfg.jpegQuality;
+  cam.fb_count     = 2;
+  cam.grab_mode    = CAMERA_GRAB_LATEST;
 
-  esp_err_t err = esp_camera_init(&config);
+  esp_err_t err = esp_camera_init(&cam);
   if (err != ESP_OK) {
     DBGF("[Camera] Init failed: 0x%x\n", err);
     return false;
@@ -170,7 +157,7 @@ void startCaptivePortal() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID);
   dnsServer.start(53, "*", WiFi.softAPIP());
-  DBGF("[WiFi] Captive portal: connect to '%s' → http://%s\n",
+  DBGF("[WiFi] Captive portal up: SSID='%s' IP=%s\n",
        AP_SSID, WiFi.softAPIP().toString().c_str());
 }
 
@@ -186,7 +173,7 @@ void connectWiFi() {
   }
   DBG("\n");
   if (WiFi.status() == WL_CONNECTED) {
-    WiFi.setTxPower((wifi_power_t)WIFI_TX_DBM);
+    WiFi.setTxPower(WIFI_TX_POWER);
     DBGF("[WiFi] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
     DBGLN("[WiFi] Failed — starting captive portal");
@@ -200,74 +187,75 @@ void connectWiFi() {
 void setupMDNS() {
   if (MDNS.begin(HOSTNAME)) {
     MDNS.addService("http", "tcp", 80);
-    DBGF("[mDNS] http://%s.local\n", HOSTNAME);
+    DBGF("[mDNS] Advertising as http://%s.local\n", HOSTNAME);
   }
 }
 
 void setupOTA() {
   ArduinoOTA.setHostname(HOSTNAME);
-  ArduinoOTA.onStart([]()  { DBGLN("[OTA] Start"); });
-  ArduinoOTA.onEnd([]()    { DBGLN("[OTA] End"); });
-  ArduinoOTA.onError([](ota_error_t e) { DBGF("[OTA] Error %u\n", e); });
+  ArduinoOTA.onStart([]()            { DBGLN("[OTA] Start"); });
+  ArduinoOTA.onEnd([]()              { DBGLN("[OTA] End"); });
+  ArduinoOTA.onError([](ota_error_t e){ DBGF("[OTA] Error %u\n", e); });
   ArduinoOTA.begin();
   DBGLN("[OTA] Ready");
 }
 
 // ============================================================
-//  RTP helpers (JPEG-over-RTP, RFC 2435)
+//  RTP/JPEG packetizer (RFC 2435, PT=26)
 // ============================================================
-void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
-  if (strlen(cfg.obsIp) == 0) return;
+#define RTP_HDR_LEN  12
+#define JPEG_HDR_LEN  8
+#define MAX_RTP_PAYLOAD 1400
+#define PKT_BUF_LEN (RTP_HDR_LEN + JPEG_HDR_LEN + MAX_RTP_PAYLOAD)
 
-  // Simple RTP/JPEG packetizer — max payload per packet
-  const size_t MAX_PAYLOAD = 1400;
+void sendRtpJpeg(const uint8_t* jpegData, size_t jpegLen) {
+  if (cfg.obsIp[0] == '\0') return;
+
+  static uint8_t pkt[PKT_BUF_LEN];
   size_t offset = 0;
-  bool   first  = true;
 
   while (offset < jpegLen) {
-    size_t payloadLen = min(MAX_PAYLOAD, jpegLen - offset);
-    bool   last       = (offset + payloadLen >= jpegLen);
+    size_t payloadLen = (jpegLen - offset) < MAX_RTP_PAYLOAD
+                        ? (jpegLen - offset) : MAX_RTP_PAYLOAD;
+    bool last = (offset + payloadLen >= jpegLen);
 
-    // 12-byte RTP header + 8-byte JPEG header
-    uint8_t pkt[12 + 8 + MAX_PAYLOAD];
     // RTP header
-    pkt[0] = 0x80;  // V=2, P=0, X=0, CC=0
-    pkt[1] = (last ? 0x80 : 0x00) | 26; // M bit on last pkt, PT=26 (JPEG)
-    pkt[2] = (rtpSeq >> 8) & 0xFF;
-    pkt[3] =  rtpSeq & 0xFF;
-    pkt[4] = (rtpTimestamp >> 24) & 0xFF;
-    pkt[5] = (rtpTimestamp >> 16) & 0xFF;
-    pkt[6] = (rtpTimestamp >>  8) & 0xFF;
-    pkt[7] =  rtpTimestamp & 0xFF;
-    pkt[8] = (rtpSsrc >> 24) & 0xFF;
-    pkt[9] = (rtpSsrc >> 16) & 0xFF;
-    pkt[10]= (rtpSsrc >>  8) & 0xFF;
-    pkt[11]=  rtpSsrc & 0xFF;
+    pkt[0]  = 0x80;
+    pkt[1]  = (last ? 0x80 : 0x00) | 26;  // M bit + PT 26 (JPEG)
+    pkt[2]  = (rtpSeq >> 8) & 0xFF;
+    pkt[3]  =  rtpSeq & 0xFF;
+    pkt[4]  = (rtpTimestamp >> 24) & 0xFF;
+    pkt[5]  = (rtpTimestamp >> 16) & 0xFF;
+    pkt[6]  = (rtpTimestamp >>  8) & 0xFF;
+    pkt[7]  =  rtpTimestamp & 0xFF;
+    pkt[8]  = (rtpSsrc >> 24) & 0xFF;
+    pkt[9]  = (rtpSsrc >> 16) & 0xFF;
+    pkt[10] = (rtpSsrc >>  8) & 0xFF;
+    pkt[11] =  rtpSsrc & 0xFF;
     // JPEG header (RFC 2435 §3.1)
-    pkt[12] = 0; // Type-specific
-    pkt[13] = (offset >> 16) & 0xFF; // Fragment offset (3 bytes)
+    pkt[12] = 0;                          // type-specific
+    pkt[13] = (offset >> 16) & 0xFF;      // fragment offset (24-bit)
     pkt[14] = (offset >>  8) & 0xFF;
     pkt[15] =  offset & 0xFF;
-    pkt[16] = 1;   // Type = 1 (JPEG baseline)
+    pkt[16] = 1;                          // JPEG type 1
     pkt[17] = cfg.jpegQuality;
-    pkt[18] = 0;   // Width in 8-pixel blocks (0 = parse from JPEG)
-    pkt[19] = 0;   // Height in 8-pixel blocks
+    pkt[18] = 0;                          // width  (0 = from JPEG SOF)
+    pkt[19] = 0;                          // height (0 = from JPEG SOF)
 
-    memcpy(pkt + 20, jpegData + offset, payloadLen);
+    memcpy(pkt + RTP_HDR_LEN + JPEG_HDR_LEN, jpegData + offset, payloadLen);
+
     udpRtp.beginPacket(cfg.obsIp, cfg.obsPort);
-    udpRtp.write(pkt, 20 + payloadLen);
+    udpRtp.write(pkt, RTP_HDR_LEN + JPEG_HDR_LEN + payloadLen);
     udpRtp.endPacket();
 
     rtpSeq++;
     offset += payloadLen;
-    first = false;
   }
-  // ~90 kHz RTP clock for video, ~3003 ticks per 30fps frame
-  rtpTimestamp += 3003;
+  rtpTimestamp += 3003;  // 90 kHz clock @ ~30 fps
 }
 
 // ============================================================
-//  Burst recording & streaming
+//  Burst
 // ============================================================
 void startBurst() {
   if (burstActive) return;
@@ -280,7 +268,7 @@ void handleBurst() {
   if (!burstActive) return;
   if (framesSent >= cfg.burstFrames) {
     burstActive = false;
-    DBGF("[Burst] Done — %u frames sent\n", framesSent);
+    DBGF("[Burst] Complete — %u frames sent\n", framesSent);
     return;
   }
   camera_fb_t* fb = esp_camera_fb_get();
@@ -296,24 +284,26 @@ void handleBurst() {
 void handleTrigger() {
   int pktSize = udpTrigger.parsePacket();
   if (pktSize <= 0) return;
+
   char buf[32];
-  udpTrigger.read(buf, sizeof(buf) - 1);
-  buf[pktSize] = '\0';
+  int readLen = pktSize < (int)(sizeof(buf) - 1) ? pktSize : (int)(sizeof(buf) - 1);
+  udpTrigger.read(buf, readLen);
+  buf[readLen] = '\0';
   DBGF("[Trigger] Received: %s\n", buf);
-  // Any incoming UDP packet on trigger port starts a burst
+
   startBurst();
-  // Send ACK back to sender
+
+  // ACK back to sender
   udpTrigger.beginPacket(udpTrigger.remoteIP(), udpTrigger.remotePort());
   udpTrigger.write((const uint8_t*)ACK_MSG, strlen(ACK_MSG));
   udpTrigger.endPacket();
-  DBGF("[Trigger] ACK sent to %s\n", udpTrigger.remoteIP().toString().c_str());
+  DBGF("[Trigger] ACK → %s\n", udpTrigger.remoteIP().toString().c_str());
 }
 
 // ============================================================
-//  Web server routes
+//  Web server
 // ============================================================
 void setupWebServer() {
-  // Captive portal redirect
   webServer.onNotFound([]() {
     if (captivePortalMode) {
       webServer.sendHeader("Location", "http://192.168.4.1/");
@@ -323,20 +313,20 @@ void setupWebServer() {
     }
   });
 
-  // Config page (GET)
   webServer.on("/", HTTP_GET, []() {
-    webServer.send(200, "text/html", buildConfigPage());
+    if (captivePortalMode)
+      webServer.send(200, "text/html", FPSTR(CAPTIVE_FORM));
+    else
+      webServer.send(200, "text/html", buildConfigPage());
   });
 
-  // Save config (POST)
   webServer.on("/save", HTTP_POST, []() {
-    if (webServer.hasArg("obsIp"))      strlcpy(cfg.obsIp, webServer.arg("obsIp").c_str(), sizeof(cfg.obsIp));
-    if (webServer.hasArg("obsPort"))    cfg.obsPort      = webServer.arg("obsPort").toInt();
-    if (webServer.hasArg("trigPort"))   cfg.triggerPort  = webServer.arg("trigPort").toInt();
-    if (webServer.hasArg("burstFrames"))cfg.burstFrames  = webServer.arg("burstFrames").toInt();
-    if (webServer.hasArg("jpegQuality"))cfg.jpegQuality  = webServer.arg("jpegQuality").toInt();
-    if (webServer.hasArg("frameSize"))  cfg.frameSize    = webServer.arg("frameSize").toInt();
-    // Captive portal WiFi credentials
+    if (webServer.hasArg("obsIp"))       strlcpy(cfg.obsIp, webServer.arg("obsIp").c_str(), sizeof(cfg.obsIp));
+    if (webServer.hasArg("obsPort"))     cfg.obsPort     = (uint16_t)webServer.arg("obsPort").toInt();
+    if (webServer.hasArg("trigPort"))    cfg.triggerPort = (uint16_t)webServer.arg("trigPort").toInt();
+    if (webServer.hasArg("burstFrames")) cfg.burstFrames = (uint16_t)webServer.arg("burstFrames").toInt();
+    if (webServer.hasArg("jpegQuality")) cfg.jpegQuality = (uint8_t)webServer.arg("jpegQuality").toInt();
+    if (webServer.hasArg("frameSize"))   cfg.frameSize   = (uint8_t)webServer.arg("frameSize").toInt();
     if (webServer.hasArg("ssid") && webServer.hasArg("psk")) {
       prefs.begin("wifi", false);
       prefs.putString("ssid", webServer.arg("ssid"));
@@ -345,23 +335,22 @@ void setupWebServer() {
     }
     saveConfig();
     webServer.send(200, "text/html",
-      "<html><body><p>Saved! <a href='/'>Back</a></p>"
+      "<html><body style='font-family:monospace;background:#111;color:#eee;padding:20px'>"
+      "<p>&#x2705; Saved. <a href='/' style='color:#f90'>Back</a></p>"
       "<p><small>Reboot to apply WiFi changes.</small></p></body></html>");
   });
 
-  // Manual trigger endpoint (for testing)
   webServer.on("/trigger", HTTP_GET, []() {
     startBurst();
     webServer.send(200, "text/plain", "Burst triggered");
   });
 
-  // Status JSON
   webServer.on("/status", HTTP_GET, []() {
     char json[256];
     snprintf(json, sizeof(json),
       "{\"burst\":%s,\"framesSent\":%u,\"ip\":\"%s\",\"rssi\":%d}",
       burstActive ? "true" : "false",
-      framesSent,
+      (unsigned)framesSent,
       WiFi.localIP().toString().c_str(),
       WiFi.RSSI());
     webServer.send(200, "application/json", json);
@@ -380,13 +369,13 @@ void checkWiFi() {
   if (millis() - lastCheck < 10000) return;
   lastCheck = millis();
   if (WiFi.status() != WL_CONNECTED) {
-    DBGLN("[WiFi] Lost connection — reconnecting...");
+    DBGLN("[WiFi] Lost — reconnecting...");
     WiFi.reconnect();
   }
 }
 
 // ============================================================
-//  setup()
+//  setup() / loop()
 // ============================================================
 void setup() {
 #ifdef DEBUG_ENABLED
@@ -402,7 +391,7 @@ void setup() {
     setupMDNS();
     setupOTA();
     udpTrigger.begin(cfg.triggerPort);
-    DBGF("[UDP] Listening for triggers on port %u\n", cfg.triggerPort);
+    DBGF("[UDP] Trigger listener on port %u\n", cfg.triggerPort);
   }
 
   setupWebServer();
@@ -411,9 +400,6 @@ void setup() {
   DBGLN("[BurstCast] Ready");
 }
 
-// ============================================================
-//  loop()
-// ============================================================
 void loop() {
   if (captivePortalMode) dnsServer.processNextRequest();
   webServer.handleClient();
