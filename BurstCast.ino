@@ -1,12 +1,6 @@
 // ============================================================
 //  BurstCast — ESP32-S3 WiFi-triggered burst cam
 //  RTSP loop server + OBS WebSocket show/hide control
-//
-//  Required libraries (Arduino Library Manager):
-//    ArduinoWebsockets  (gilmaimon)
-//    ArduinoJson        (bblanchon)
-//  Manual install:
-//    Micro-RTSP         https://github.com/geeksville/Micro-RTSP
 // ============================================================
 
 #include <Arduino.h>
@@ -17,16 +11,13 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 
-#include <Secrets.h>   // MYSSIDIOT, MYPSKIOT
+#include <Secrets.h>
 #include "config.h"
 #include "camera.h"
 #include "rtsp.h"
 #include "obsws.h"
 #include "html.h"
 
-// ============================================================
-//  Globals
-// ============================================================
 Preferences prefs;
 WebServer   webServer(80);
 DNSServer   dnsServer;
@@ -34,7 +25,6 @@ WiFiUDP     udpTrigger;
 
 bool captivePortalMode = false;
 
-// Burst timing
 static uint32_t recordStartMs  = 0;
 static uint32_t recordInterval = 0;
 static uint32_t showUntilMs    = 0;
@@ -102,10 +92,8 @@ void handleRecording() {
     float clipDur = (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
     Serial.printf("[Burst] Done — %u frames, %.1fs\n",
       (unsigned)bufferFrameCount(), clipDur);
-
     if (obsWsReady()) {
       obsSetSourceVisible(true);
-      // visibleSecs == 0 means auto: stay visible for exactly the clip length
       uint32_t displayMs = cfg.visibleSecs > 0
         ? (uint32_t)cfg.visibleSecs * 1000
         : (uint32_t)(clipDur * 1000);
@@ -133,7 +121,7 @@ void handleTrigger() {
   int pktSize = udpTrigger.parsePacket();
   if (pktSize <= 0) return;
   char buf[32];
-  int n = min(pktSize, (int)(sizeof(buf) - 1));
+  int n = min(pktSize, (int)(sizeof(buf)-1));
   udpTrigger.read(buf, n); buf[n] = '\0';
   Serial.printf("[Trigger] UDP: %s\n", buf);
   startBurst();
@@ -219,16 +207,14 @@ void setupWebServer() {
   });
 
   webServer.on("/status", HTTP_GET, []() {
-    const char* stateStr =
+    const char* s =
       burstState == STATE_RECORDING ? "Recording" :
-      burstState == STATE_LOOPING   ? "Looping" : "Idle";
+      burstState == STATE_LOOPING   ? "Looping"   : "Idle";
     char json[256];
     snprintf(json, sizeof(json),
       "{\"state\":\"%s\",\"frames\":%u,\"ip\":\"%s\",\"rssi\":%d,\"camOk\":%s,\"obsWs\":%s}",
-      stateStr,
-      (unsigned)bufferFrameCount(),
-      WiFi.localIP().toString().c_str(),
-      WiFi.RSSI(),
+      s, (unsigned)bufferFrameCount(),
+      WiFi.localIP().toString().c_str(), WiFi.RSSI(),
       cameraOk() ? "true" : "false",
       obsWsReady() ? "true" : "false");
     webServer.send(200, "application/json", json);
@@ -237,7 +223,7 @@ void setupWebServer() {
   webServer.on("/cam.jpg", HTTP_GET, []() {
     if (!cameraOk()) { webServer.send(503, "text/plain", "Camera not ready"); return; }
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb)       { webServer.send(503, "text/plain", "Frame grab failed"); return; }
+    if (!fb) { webServer.send(503, "text/plain", "Frame grab failed"); return; }
     webServer.sendHeader("Cache-Control", "no-cache, no-store");
     webServer.send_P(200, "image/jpeg", (const char*)fb->buf, fb->len);
     esp_camera_fb_return(fb);
@@ -286,25 +272,22 @@ void setup() {
     ArduinoOTA.setHostname(HOSTNAME);
     ArduinoOTA.begin();
     udpTrigger.begin(cfg.triggerPort);
-    rtspBegin();
     obsWsBegin();
   }
   setupWebServer();
+
+  // Camera MUST init before rtspBegin() so camWidth/camHeight
+  // reflect the actual pixel dimensions the sensor produces.
   if (!cameraInit()) {
     Serial.println("[BurstCast] Camera FAILED");
   }
-  Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n",
-    WiFi.localIP().toString().c_str());
 
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (fb) {
-    Serial.printf("JPEG len=%d, first 32 bytes:\n", fb->len);
-    for (int i = 0; i < 32 && i < fb->len; i++)
-      Serial.printf("%02X ", fb->buf[i]);
-    Serial.println();
-    esp_camera_fb_return(fb);
+  if (!captivePortalMode) {
+    rtspBegin(camWidth, camHeight);
   }
 
+  Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n",
+    WiFi.localIP().toString().c_str());
 }
 
 void loop() {

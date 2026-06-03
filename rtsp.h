@@ -12,7 +12,6 @@
 static uint16_t rtspWidth  = 640;
 static uint16_t rtspHeight = 480;
 
-// Strip DRI (0xdd) and all APPn (0xe0-0xef) markers from a JPEG buffer.
 static uint8_t jpegScratch[65536];
 
 static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t* outLen) {
@@ -24,63 +23,43 @@ static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t*
   if (p + 2 > end || p[0] != 0xFF || p[1] != 0xD8) {
     *outLen = srcLen; return src;
   }
-  dst[dstLen++] = 0xFF;
-  dst[dstLen++] = 0xD8;
+  dst[dstLen++] = 0xFF; dst[dstLen++] = 0xD8;
   p += 2;
 
   while (p + 2 <= end) {
     if (p[0] != 0xFF) {
       size_t rem = end - p;
-      if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
+      if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst+dstLen, p, rem); dstLen += rem; }
       break;
     }
-    uint8_t marker = p[1];
-    p += 2;
-
+    uint8_t marker = p[1]; p += 2;
     if (marker == 0xD8) continue;
-    if (marker == 0xD9) {
-      if (dstLen + 2 <= sizeof(jpegScratch)) { dst[dstLen++]=0xFF; dst[dstLen++]=0xD9; }
-      break;
-    }
-    if (marker >= 0xD0 && marker <= 0xD7) {
-      if (dstLen + 2 <= sizeof(jpegScratch)) { dst[dstLen++]=0xFF; dst[dstLen++]=marker; }
-      continue;
-    }
-
+    if (marker == 0xD9) { if (dstLen+2<=sizeof(jpegScratch)){dst[dstLen++]=0xFF;dst[dstLen++]=0xD9;} break; }
+    if (marker >= 0xD0 && marker <= 0xD7) { if (dstLen+2<=sizeof(jpegScratch)){dst[dstLen++]=0xFF;dst[dstLen++]=marker;} continue; }
     if (p + 2 > end) break;
-    uint16_t segLen = (p[0] << 8) | p[1];
+    uint16_t segLen = (p[0]<<8)|p[1];
     if (segLen < 2) break;
-
     bool skip = (marker == 0xDD) || (marker >= 0xE0 && marker <= 0xEF);
-
     if (marker == 0xDA) {
       if (!skip) {
-        size_t headerTotal = 2 + segLen;
-        if (dstLen + headerTotal <= sizeof(jpegScratch)) {
-          dst[dstLen++] = 0xFF;
-          dst[dstLen++] = 0xDA;
-          memcpy(dst + dstLen, p, segLen);
-          dstLen += segLen;
+        if (dstLen+2+segLen <= sizeof(jpegScratch)) {
+          dst[dstLen++]=0xFF; dst[dstLen++]=0xDA;
+          memcpy(dst+dstLen, p, segLen); dstLen += segLen;
         }
       }
       p += segLen;
       size_t rem = end - p;
-      if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst + dstLen, p, rem); dstLen += rem; }
+      if (dstLen + rem <= sizeof(jpegScratch)) { memcpy(dst+dstLen, p, rem); dstLen += rem; }
       break;
     }
-
     if (!skip) {
-      size_t total = 2 + segLen;
-      if (dstLen + total <= sizeof(jpegScratch)) {
-        dst[dstLen++] = 0xFF;
-        dst[dstLen++] = marker;
-        memcpy(dst + dstLen, p, segLen);
-        dstLen += segLen;
+      if (dstLen+2+segLen <= sizeof(jpegScratch)) {
+        dst[dstLen++]=0xFF; dst[dstLen++]=marker;
+        memcpy(dst+dstLen, p, segLen); dstLen += segLen;
       }
     }
     p += segLen;
   }
-
   *outLen = dstLen;
   return dst;
 }
@@ -95,46 +74,27 @@ public:
       if (f && f->buf) sendClean(f->buf, f->len, curMsec);
     } else {
       camera_fb_t* fb = esp_camera_fb_get();
-      if (fb) {
-        sendClean(fb->buf, fb->len, curMsec);
-        esp_camera_fb_return(fb);
-      }
+      if (fb) { sendClean(fb->buf, fb->len, curMsec); esp_camera_fb_return(fb); }
     }
   }
 
 private:
-  bool _firstFrame = true;
-
   void sendClean(const uint8_t* buf, size_t len, uint32_t ms) {
     size_t cleanLen = 0;
     const uint8_t* clean = stripBadMarkers(buf, len, &cleanLen);
-
-    // Log the first frame actually sent over RTSP so we can compare
-    // SOF dimensions vs the rtspWidth/rtspHeight the streamer was constructed with.
-    if (_firstFrame) {
-      _firstFrame = false;
-      Serial.printf("[RTSP] Streamer constructed with %ux%u\n", rtspWidth, rtspHeight);
-      debugJpegFrame(clean, cleanLen, "rtsp-first");
-    }
-
     streamFrame(clean, cleanLen, ms);
   }
 };
 
 static WiFiServer     rtspServer(554);
-static BurstStreamer* streamer   = nullptr;
+static BurstStreamer* streamer    = nullptr;
 static uint32_t       lastFrameMs = 0;
 
-inline void rtspBegin() {
-  sensor_t* s = esp_camera_sensor_get();
-  if (s) {
-    static const uint16_t FW[] = {160,176,240,240,320,400,480,640,800,1024,1280,1280,1600};
-    static const uint16_t FH[] = {120,144,176,240,240,296,320,480,600, 768, 720,1024,1200};
-    uint8_t fs = s->status.framesize < 13 ? s->status.framesize : 6;
-    rtspWidth  = FW[fs];
-    rtspHeight = FH[fs];
-  }
-  Serial.printf("[RTSP] Frame size: %dx%d\n", rtspWidth, rtspHeight);
+// Call AFTER cameraInit() so camWidth/camHeight reflect actual sensor output.
+inline void rtspBegin(uint16_t w, uint16_t h) {
+  rtspWidth  = w;
+  rtspHeight = h;
+  Serial.printf("[RTSP] Starting with %ux%u\n", rtspWidth, rtspHeight);
   streamer = new BurstStreamer(rtspWidth, rtspHeight);
   String hostport = WiFi.localIP().toString() + ":554";
   streamer->setURI(hostport, "mjpeg", "1");
@@ -144,7 +104,6 @@ inline void rtspBegin() {
 
 inline void rtspHandle() {
   if (!streamer) return;
-
   WiFiClient newClient = rtspServer.accept();
   if (newClient) {
     WiFiClient* heapClient = new WiFiClient(newClient);
@@ -153,9 +112,7 @@ inline void rtspHandle() {
     lastFrameMs = 0;
     Serial.printf("[RTSP] Client: %s\n", heapClient->remoteIP().toString().c_str());
   }
-
   streamer->handleRequests(0);
-
   if (streamer->anySessions()) {
     uint32_t interval = cfg.fps > 0 ? 1000UL / cfg.fps : 66;
     if (millis() - lastFrameMs >= interval) {
