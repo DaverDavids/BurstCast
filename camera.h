@@ -63,15 +63,19 @@ inline bool cameraInit() {
   else
     Serial.printf("[Camera] PSRAM free: %u KB\n", ESP.getFreePsram() / 1024);
 
-  framesize_t targetSize = (framesize_t)cfg.frameSize;
-
-  // For large frames (HD and above) use a single frame buffer to avoid
-  // exhausting PSRAM. Double-buffering is only beneficial at smaller sizes
-  // where the DMA transfer is fast enough to keep up.
-  bool largeFrame = (cfg.frameSize >= 10);  // FRAMESIZE_HD = index 10
+  // OV3660 quirk: the driver only allocates DMA for the config frame_size.
+  // Setting a smaller size at init then calling set_framesize() later works
+  // ONLY if the init size >= the target size (buffer must already be big enough).
+  // Strategy: always init at UXGA (the sensor max = 1600x1200), then
+  // set_framesize() down to the user-configured size. This guarantees the DMA
+  // buffer is always large enough for any target.
+  //
+  // For HD and above we use fb_count=1 to avoid exhausting PSRAM.
+  bool largeFrame = (cfg.frameSize >= 10);
   uint8_t fbCount = (!psramFound() || largeFrame) ? 1 : 2;
 
-  Serial.printf("[Camera] Target frameSize=%u fbCount=%u\n", cfg.frameSize, fbCount);
+  Serial.printf("[Camera] Init UXGA->frameSize=%u fbCount=%u xclk=%uMHz\n",
+    cfg.frameSize, fbCount, cfg.xclkMhz);
 
   camera_config_t cam = {};
   cam.ledc_channel = LEDC_CHANNEL_0;
@@ -90,7 +94,7 @@ inline bool cameraInit() {
   cam.pin_reset    = CAM_PIN_RESET;
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
-  cam.frame_size   = targetSize;   // allocate DMA for the actual target size
+  cam.frame_size   = FRAMESIZE_UXGA;  // always init at max so DMA buf is large enough
   cam.jpeg_quality = cfg.jpegQuality;
   cam.fb_count     = fbCount;
   cam.grab_mode    = CAMERA_GRAB_LATEST;
@@ -103,21 +107,31 @@ inline bool cameraInit() {
   }
 
   sensor_t* s = esp_camera_sensor_get();
-  if (s) {
-    Serial.printf("[Camera] Sensor PID: 0x%x\n", s->id.PID);
-    s->set_vflip(s, 1);
-    s->set_hmirror(s, 0);
-    // No set_framesize() call here — the driver already owns that size
-    // from the config above. Calling set_framesize() after init on the
-    // OV3660 can silently fail or reallocate to a smaller buffer.
+  if (!s) {
+    Serial.println("[Camera] sensor_get FAILED");
+    return false;
+  }
+  Serial.printf("[Camera] Sensor PID: 0x%x\n", s->id.PID);
+  s->set_vflip(s, 1);
+  s->set_hmirror(s, 0);
+
+  // Resize to the user-configured size.
+  // OV3660 driver quirk: after set_framesize(), the first fb_get() still
+  // returns the old size. Must grab+discard twice to flush the pipeline.
+  if ((framesize_t)cfg.frameSize != FRAMESIZE_UXGA) {
+    s->set_framesize(s, (framesize_t)cfg.frameSize);
+    // Double-flush: first grab returns stale UXGA frame, second returns new size
+    camera_fb_t* fb1 = esp_camera_fb_get(); if (fb1) esp_camera_fb_return(fb1);
+    camera_fb_t* fb2 = esp_camera_fb_get(); if (fb2) esp_camera_fb_return(fb2);
+    Serial.printf("[Camera] set_framesize(%u) + double-flush done\n", cfg.frameSize);
   }
 
-  // Flush warmup frames so AE/AWB locks and sensor produces stable output.
+  // Additional warmup: let AE/AWB stabilize and confirm final output size
   Serial.print("[Camera] Warming up");
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 10; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
-      if (i == 7) {
+      if (i == 9) {
         uint16_t w = 0, h = 0;
         if (jpegSOFDims(fb->buf, fb->len, &w, &h) && w > 0 && h > 0) {
           camWidth  = w;
