@@ -83,11 +83,22 @@ inline bool cameraInit() {
   cam.pin_reset    = CAM_PIN_RESET;
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
-  cam.frame_size   = (framesize_t)cfg.frameSize;
   cam.jpeg_quality = cfg.jpegQuality;
-  cam.fb_count     = 1;
   cam.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+
+  // OV3660 fix: always init at UXGA so the DMA buffer is maximally allocated
+  // and the sensor scaler initializes correctly. Then call set_framesize() to
+  // downscale to the target — exactly what the reference CameraWebServer does.
+  if (psramFound()) {
+    cam.frame_size   = FRAMESIZE_UXGA;
+    cam.jpeg_quality = 10;
+    cam.fb_count     = 2;
+    cam.grab_mode    = CAMERA_GRAB_LATEST;
+  } else {
+    cam.frame_size = FRAMESIZE_SVGA;
+    cam.fb_count   = 1;
+  }
 
   esp_err_t err = esp_camera_init(&cam);
   if (err != ESP_OK) {
@@ -101,17 +112,19 @@ inline bool cameraInit() {
     return false;
   }
 
-  // OV3660 fix: even though frame_size was set in camera_config_t, the sensor's
-  // internal scaler does not always latch the window registers during init.
-  // Explicitly calling set_framesize() re-issues the full I2C window register
-  // sequence and forces the correct output resolution.
+  // OV3660-specific tuning (matches reference)
+  if (s->id.PID == OV3660_PID) {
+    s->set_vflip(s, 1);
+    s->set_brightness(s, 1);
+    s->set_saturation(s, 2);
+  }
+
+  // Now downscale to the user's configured target resolution.
+  // This is the canonical fix: set_framesize() from UXGA works correctly;
+  // initing directly at the target size does not on OV3660.
   s->set_framesize(s, (framesize_t)cfg.frameSize);
-  delay(100); // allow sensor to settle after window register update
 
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 0);
-
-  // Warmup: discard early frames while AE/AWB settle
+  // Warmup: discard early frames while AE/AWB settle at the new window size
   Serial.print("[Camera] Warming up");
   for (int i = 0; i < 10; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
@@ -132,34 +145,12 @@ inline bool cameraInit() {
         camWidth  = fb->width;
         camHeight = fb->height;
       }
-      Serial.printf("\n[Camera] Confirmed dims: %ux%u (fb: %ux%u)\n",
-        camWidth, camHeight, fb->width, fb->height);
+      Serial.printf("\n[Camera] Ready — %uMHz %s %ux%u\n",
+        cfg.xclkMhz, psramFound() ? "PSRAM" : "DRAM", camWidth, camHeight);
       esp_camera_fb_return(fb);
     }
   }
 
-  // Switch to GRAB_LATEST + fb_count=2 for best burst capture performance
-  if (psramFound()) {
-    esp_camera_deinit();
-    cam.fb_count  = 2;
-    cam.grab_mode = CAMERA_GRAB_LATEST;
-    err = esp_camera_init(&cam);
-    if (err != ESP_OK) {
-      Serial.printf("[Camera] Re-init GRAB_LATEST FAILED: 0x%x\n", err);
-      return false;
-    }
-    s = esp_camera_sensor_get();
-    if (s) {
-      // Re-apply fix and settings after re-init
-      s->set_framesize(s, (framesize_t)cfg.frameSize);
-      delay(100);
-      s->set_vflip(s, 1);
-      s->set_hmirror(s, 0);
-    }
-  }
-
-  Serial.printf("[Camera] Ready — %uMHz %s %ux%u\n",
-    cfg.xclkMhz, psramFound() ? "PSRAM" : "DRAM", camWidth, camHeight);
   camReady = true;
   return true;
 }
