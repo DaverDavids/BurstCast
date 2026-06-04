@@ -30,7 +30,6 @@ WiFiUDP     udpTrigger;
 bool captivePortalMode = false;
 
 static uint32_t recordStartMs  = 0;
-static uint32_t recordInterval = 0;
 static uint32_t showUntilMs    = 0;
 static bool     obsHideArmed   = false;
 
@@ -80,22 +79,29 @@ void startBurst() {
   if (!cameraOk()) { Serial.println("[Burst] Camera not ready"); return; }
   Serial.println("[Burst] Recording started");
   bufferClear();
-  burstState      = STATE_RECORDING;
-  recordStartMs   = millis();
-  recordInterval  = cfg.fps > 0 ? 1000UL / cfg.fps : 66;
+  burstState    = STATE_RECORDING;
+  recordStartMs = millis();
+  // No recordInterval — capture runs as fast as the sensor delivers frames.
+  // bufferAppendFrame() skips duplicate sensor buffers automatically.
 }
 
 void handleRecording() {
   if (burstState != STATE_RECORDING) return;
-  static uint32_t lastCapMs = 0;
-  if (millis() - lastCapMs < recordInterval) return;
-  lastCapMs = millis();
 
+  // Grab-when-ready: no fixed interval gate. bufferAppendFrame() returns false
+  // immediately if the sensor hasn't produced a new frame yet (duplicate guard),
+  // so this is cheap to call every loop() iteration.
   if (bufferFrameCount() >= cfg.burstFrames) {
     burstState = STATE_LOOPING;
-    float clipDur = (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
-    Serial.printf("[Burst] Done — %u frames, %.1fs\n",
-      (unsigned)bufferFrameCount(), clipDur);
+
+    // Compute actual clip duration from real capture timestamps, not cfg.fps.
+    // bufferClipDurationMs() returns first->last frame delta in ms.
+    uint32_t clipMs  = bufferClipDurationMs();
+    float    clipDur = clipMs > 0 ? clipMs / 1000.0f : (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
+    Serial.printf("[Burst] Done — %u frames, %.1fs (%.1f fps actual)\n",
+      (unsigned)bufferFrameCount(), clipDur,
+      clipMs > 0 ? (float)(cfg.burstFrames - 1) * 1000.0f / clipMs : 0.0f);
+
     if (obsWsReady()) {
       obsSetSourceVisible(true);
       uint32_t displayMs = cfg.visibleSecs > 0

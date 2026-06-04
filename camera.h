@@ -194,9 +194,35 @@ inline void bufferClear() {
   playbackIdx = 0;
 }
 
+// Returns the actual wall-clock duration of the captured clip in ms.
+// Uses first/last captureMs timestamps so the result reflects real sensor rate,
+// not the configured cfg.fps value. Returns 0 if < 2 frames captured.
+inline uint32_t bufferClipDurationMs() {
+  if (frameBuffer.size() < 2) return 0;
+  return frameBuffer.back().captureMs - frameBuffer.front().captureMs;
+}
+
 inline bool bufferAppendFrame() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return false;
+
+  // Duplicate guard: skip if this is the same buffer the sensor returned last
+  // time (i.e. no new frame has been produced yet). Check last 4 bytes of the
+  // JPEG bitstream — they change with every unique frame even for static scenes
+  // due to entropy coding variance; identical bytes means the DMA hasn't
+  // refreshed the buffer.
+  static size_t   lastLen  = 0;
+  static uint32_t lastTail = 0;
+  uint32_t thisTail = 0;
+  if (fb->len >= 4)
+    memcpy(&thisTail, fb->buf + fb->len - 4, 4);
+  if (fb->len == lastLen && thisTail == lastTail) {
+    esp_camera_fb_return(fb);
+    return false;   // sensor hasn't delivered a new frame yet
+  }
+  lastLen  = fb->len;
+  lastTail = thisTail;
+
   uint8_t* copy = (uint8_t*)heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (copy) {
     memcpy(copy, fb->buf, fb->len);
