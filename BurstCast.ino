@@ -18,7 +18,6 @@
 #include "obsws.h"
 #include "html.h"
 
-// Bundle Micro-RTSP sources directly so Arduino compiles them
 #include "Micro-RTSP/src/CStreamer.cpp"
 #include "Micro-RTSP/src/CRtspSession.cpp"
 
@@ -29,9 +28,9 @@ WiFiUDP     udpTrigger;
 
 bool captivePortalMode = false;
 
-static uint32_t recordStartMs  = 0;
-static uint32_t showUntilMs    = 0;
-static bool     obsHideArmed   = false;
+static uint32_t recordStartMs = 0;
+static uint32_t showUntilMs   = 0;
+static bool     obsHideArmed  = false;
 
 // ============================================================
 //  Preferences
@@ -50,6 +49,23 @@ void loadConfig() {
   cfg.fps          = prefs.getUChar ("fps",          DEFAULT_FPS);
   cfg.xclkMhz      = prefs.getUChar ("xclkMhz",     DEFAULT_XCLK_MHZ);
   cfg.visibleSecs  = prefs.getUShort("visibleSecs",  DEFAULT_VISIBLE_SECS);
+  // Sensor tuning
+  cfg.camBrightness = prefs.getChar  ("camBright",   DEFAULT_CAM_BRIGHTNESS);
+  cfg.camContrast   = prefs.getChar  ("camContrast", DEFAULT_CAM_CONTRAST);
+  cfg.camSaturation = prefs.getChar  ("camSat",      DEFAULT_CAM_SATURATION);
+  cfg.camSharpness  = prefs.getChar  ("camSharp",    DEFAULT_CAM_SHARPNESS);
+  cfg.camDenoise    = prefs.getUChar ("camDenoise",  DEFAULT_CAM_DENOISE);
+  cfg.camAec        = prefs.getUChar ("camAec",      DEFAULT_CAM_AEC);
+  cfg.camAecVal     = prefs.getUShort("camAecVal",   DEFAULT_CAM_AEC_VAL);
+  cfg.camGain       = prefs.getUChar ("camGain",     DEFAULT_CAM_GAIN);
+  cfg.camGainCtrl   = prefs.getUChar ("camGainCtrl", DEFAULT_CAM_GAIN_CTRL);
+  cfg.camAwb        = prefs.getUChar ("camAwb",      DEFAULT_CAM_AWB);
+  cfg.camAwbGain    = prefs.getUChar ("camAwbGain",  DEFAULT_CAM_AWB_GAIN);
+  cfg.camWbMode     = prefs.getUChar ("camWbMode",   DEFAULT_CAM_WB_MODE);
+  cfg.camVflip      = prefs.getUChar ("camVflip",    DEFAULT_CAM_VFLIP);
+  cfg.camHflip      = prefs.getUChar ("camHflip",    DEFAULT_CAM_HFLIP);
+  cfg.camLenc       = prefs.getUChar ("camLenc",     DEFAULT_CAM_LENC);
+  cfg.camDcw        = prefs.getUChar ("camDcw",      DEFAULT_CAM_DCW);
   prefs.end();
 }
 
@@ -67,6 +83,23 @@ void saveConfig() {
   prefs.putUChar ("fps",        cfg.fps);
   prefs.putUChar ("xclkMhz",    cfg.xclkMhz);
   prefs.putUShort("visibleSecs",cfg.visibleSecs);
+  // Sensor tuning
+  prefs.putChar  ("camBright",  cfg.camBrightness);
+  prefs.putChar  ("camContrast",cfg.camContrast);
+  prefs.putChar  ("camSat",     cfg.camSaturation);
+  prefs.putChar  ("camSharp",   cfg.camSharpness);
+  prefs.putUChar ("camDenoise", cfg.camDenoise);
+  prefs.putUChar ("camAec",     cfg.camAec);
+  prefs.putUShort("camAecVal",  cfg.camAecVal);
+  prefs.putUChar ("camGain",    cfg.camGain);
+  prefs.putUChar ("camGainCtrl",cfg.camGainCtrl);
+  prefs.putUChar ("camAwb",     cfg.camAwb);
+  prefs.putUChar ("camAwbGain", cfg.camAwbGain);
+  prefs.putUChar ("camWbMode",  cfg.camWbMode);
+  prefs.putUChar ("camVflip",   cfg.camVflip);
+  prefs.putUChar ("camHflip",   cfg.camHflip);
+  prefs.putUChar ("camLenc",    cfg.camLenc);
+  prefs.putUChar ("camDcw",     cfg.camDcw);
   prefs.end();
   Serial.println("[Config] Saved");
 }
@@ -81,27 +114,17 @@ void startBurst() {
   bufferClear();
   burstState    = STATE_RECORDING;
   recordStartMs = millis();
-  // No recordInterval — capture runs as fast as the sensor delivers frames.
-  // bufferAppendFrame() skips duplicate sensor buffers automatically.
 }
 
 void handleRecording() {
   if (burstState != STATE_RECORDING) return;
-
-  // Grab-when-ready: no fixed interval gate. bufferAppendFrame() returns false
-  // immediately if the sensor hasn't produced a new frame yet (duplicate guard),
-  // so this is cheap to call every loop() iteration.
   if (bufferFrameCount() >= cfg.burstFrames) {
     burstState = STATE_LOOPING;
-
-    // Compute actual clip duration from real capture timestamps, not cfg.fps.
-    // bufferClipDurationMs() returns first->last frame delta in ms.
     uint32_t clipMs  = bufferClipDurationMs();
     float    clipDur = clipMs > 0 ? clipMs / 1000.0f : (float)cfg.burstFrames / max((uint8_t)1, cfg.fps);
     Serial.printf("[Burst] Done — %u frames, %.1fs (%.1f fps actual)\n",
       (unsigned)bufferFrameCount(), clipDur,
       clipMs > 0 ? (float)(cfg.burstFrames - 1) * 1000.0f / clipMs : 0.0f);
-
     if (obsWsReady()) {
       obsSetSourceVisible(true);
       uint32_t displayMs = cfg.visibleSecs > 0
@@ -118,10 +141,29 @@ void handleRecording() {
 
 void handleObsHide() {
   if (!obsHideArmed) return;
-  if (millis() >= showUntilMs) {
-    obsSetSourceVisible(false);
-    obsHideArmed = false;
-  }
+  if (millis() >= showUntilMs) { obsSetSourceVisible(false); obsHideArmed = false; }
+}
+
+// Parse sensor fields from the active webServer args into cfg.
+// Used by both /save and /sensorapply.
+static void parseSensorArgs() {
+  if (webServer.hasArg("camBright"))   cfg.camBrightness = webServer.arg("camBright").toInt();
+  if (webServer.hasArg("camContrast")) cfg.camContrast   = webServer.arg("camContrast").toInt();
+  if (webServer.hasArg("camSat"))      cfg.camSaturation = webServer.arg("camSat").toInt();
+  if (webServer.hasArg("camSharp"))    cfg.camSharpness  = webServer.arg("camSharp").toInt();
+  if (webServer.hasArg("camDenoise"))  cfg.camDenoise    = webServer.arg("camDenoise").toInt();
+  // AEC — checkbox: present=1, absent=0
+  cfg.camAec = webServer.hasArg("camAec") ? 1 : 0;
+  if (webServer.hasArg("camAecVal"))   cfg.camAecVal     = webServer.arg("camAecVal").toInt();
+  cfg.camGain = webServer.hasArg("camGain") ? 1 : 0;
+  if (webServer.hasArg("camGainCtrl")) cfg.camGainCtrl   = webServer.arg("camGainCtrl").toInt();
+  cfg.camAwb    = webServer.hasArg("camAwb")    ? 1 : 0;
+  cfg.camAwbGain= webServer.hasArg("camAwbGain")? 1 : 0;
+  if (webServer.hasArg("camWbMode"))   cfg.camWbMode     = webServer.arg("camWbMode").toInt();
+  cfg.camVflip  = webServer.hasArg("camVflip")  ? 1 : 0;
+  cfg.camHflip  = webServer.hasArg("camHflip")  ? 1 : 0;
+  cfg.camLenc   = webServer.hasArg("camLenc")   ? 1 : 0;
+  cfg.camDcw    = webServer.hasArg("camDcw")    ? 1 : 0;
 }
 
 // ============================================================
@@ -189,7 +231,6 @@ void setupWebServer() {
   });
 
   webServer.on("/save", HTTP_POST, []() {
-    // Snapshot current camera-affecting values to detect changes
     uint8_t oldFrameSize = cfg.frameSize;
     uint8_t oldXclkMhz  = cfg.xclkMhz;
 
@@ -205,10 +246,11 @@ void setupWebServer() {
     if (webServer.hasArg("fps"))           cfg.fps           = webServer.arg("fps").toInt();
     if (webServer.hasArg("xclkMhz"))       cfg.xclkMhz       = webServer.arg("xclkMhz").toInt();
     if (webServer.hasArg("visibleSecs"))   cfg.visibleSecs   = webServer.arg("visibleSecs").toInt();
+    parseSensorArgs();
     saveConfig();
 
-    // If resolution or clock changed, reinit the camera immediately — no reboot needed.
-    if (cfg.frameSize != oldFrameSize || cfg.xclkMhz != oldXclkMhz) {
+    bool needReinit = (cfg.frameSize != oldFrameSize || cfg.xclkMhz != oldXclkMhz);
+    if (needReinit) {
       Serial.printf("[Camera] Settings changed (frameSize %u->%u, xclk %u->%u) — reinitializing...\n",
         oldFrameSize, cfg.frameSize, oldXclkMhz, cfg.xclkMhz);
       burstState = STATE_IDLE;
@@ -218,9 +260,20 @@ void setupWebServer() {
       } else {
         Serial.println("[Camera] Reinit FAILED");
       }
+    } else {
+      // Only sensor tuning changed — apply live, no reinit needed.
+      applySensorSettings();
     }
 
     webServer.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Apply sensor settings live without saving to NVS.
+  // Used by the web UI 'Apply Now' button for live preview tuning.
+  webServer.on("/sensorapply", HTTP_POST, []() {
+    parseSensorArgs();
+    bool ok = applySensorSettings();
+    webServer.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
   });
 
   webServer.on("/trigger", HTTP_GET, []() {
@@ -303,19 +356,9 @@ void setup() {
     obsWsBegin();
   }
   setupWebServer();
-
-  // Camera MUST init before rtspBegin() so camWidth/camHeight
-  // reflect the actual pixel dimensions the sensor produces.
-  if (!cameraInit()) {
-    Serial.println("[BurstCast] Camera FAILED");
-  }
-
-  if (!captivePortalMode) {
-    rtspBegin(camWidth, camHeight);
-  }
-
-  Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n",
-    WiFi.localIP().toString().c_str());
+  if (!cameraInit()) Serial.println("[BurstCast] Camera FAILED");
+  if (!captivePortalMode) rtspBegin(camWidth, camHeight);
+  Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n", WiFi.localIP().toString().c_str());
 }
 
 void loop() {

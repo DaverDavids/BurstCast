@@ -24,18 +24,9 @@
 #define CAM_PIN_PCLK    13
 
 static const framesize_t FRAMESIZE_MAP[] = {
-  FRAMESIZE_QQVGA,
-  FRAMESIZE_QCIF,
-  FRAMESIZE_HQVGA,
-  FRAMESIZE_240X240,
-  FRAMESIZE_QVGA,
-  FRAMESIZE_CIF,
-  FRAMESIZE_HVGA,
-  FRAMESIZE_VGA,
-  FRAMESIZE_SVGA,
-  FRAMESIZE_XGA,
-  FRAMESIZE_HD,
-  FRAMESIZE_SXGA,
+  FRAMESIZE_QQVGA, FRAMESIZE_QCIF,  FRAMESIZE_HQVGA, FRAMESIZE_240X240,
+  FRAMESIZE_QVGA,  FRAMESIZE_CIF,   FRAMESIZE_HVGA,  FRAMESIZE_VGA,
+  FRAMESIZE_SVGA,  FRAMESIZE_XGA,   FRAMESIZE_HD,    FRAMESIZE_SXGA,
   FRAMESIZE_UXGA,
 };
 #define FRAMESIZE_MAP_COUNT 13
@@ -75,6 +66,31 @@ static bool jpegSOFDims(const uint8_t* buf, size_t len, uint16_t* w, uint16_t* h
   return false;
 }
 
+// Apply all cfg.camXxx sensor tuning fields to the live sensor.
+// Safe to call any time after cameraInit() succeeds.
+inline bool applySensorSettings() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return false;
+  s->set_brightness(s,  cfg.camBrightness);
+  s->set_contrast(s,    cfg.camContrast);
+  s->set_saturation(s,  cfg.camSaturation);
+  s->set_sharpness(s,   cfg.camSharpness);
+  s->set_denoise(s,     cfg.camDenoise);
+  s->set_exposure_ctrl(s, cfg.camAec);
+  if (!cfg.camAec) s->set_aec_value(s, cfg.camAecVal);
+  s->set_gain_ctrl(s,   cfg.camGain);
+  if (!cfg.camGain) s->set_agc_gain(s, cfg.camGainCtrl);
+  s->set_whitebal(s,    cfg.camAwb);
+  s->set_awb_gain(s,    cfg.camAwbGain);
+  s->set_wb_mode(s,     cfg.camWbMode);
+  s->set_vflip(s,       cfg.camVflip);
+  s->set_hmirror(s,     cfg.camHflip);
+  s->set_lenc(s,        cfg.camLenc);
+  s->set_dcw(s,         cfg.camDcw);
+  Serial.println("[Camera] Sensor settings applied");
+  return true;
+}
+
 inline bool cameraInit(bool isReinit = false) {
   Serial.printf("[Camera] frameSize=%u (enum %u) xclkMhz=%u quality=%u\n",
     cfg.frameSize,
@@ -106,16 +122,16 @@ inline bool cameraInit(bool isReinit = false) {
   cam.jpeg_quality = cfg.jpegQuality;
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
-  // Always use GRAB_LATEST on both paths to minimise latency
   if (psramFound()) {
     cam.frame_size   = FRAMESIZE_UXGA;
     cam.jpeg_quality = 10;
     cam.fb_count     = 2;
+    cam.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
     cam.frame_size = FRAMESIZE_SVGA;
     cam.fb_count   = 1;
+    cam.grab_mode  = CAMERA_GRAB_LATEST;
   }
-  cam.grab_mode = CAMERA_GRAB_LATEST;
 
   esp_err_t err = esp_camera_init(&cam);
   if (err != ESP_OK) {
@@ -124,19 +140,13 @@ inline bool cameraInit(bool isReinit = false) {
   }
 
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) {
-    Serial.println("[Camera] sensor_get FAILED");
-    return false;
-  }
+  if (!s) { Serial.println("[Camera] sensor_get FAILED"); return false; }
 
   framesize_t target = (cfg.frameSize < FRAMESIZE_MAP_COUNT)
                        ? FRAMESIZE_MAP[cfg.frameSize]
                        : FRAMESIZE_VGA;
-  if (target != FRAMESIZE_UXGA) {
-    s->set_framesize(s, target);
-  }
+  if (target != FRAMESIZE_UXGA) s->set_framesize(s, target);
 
-  // Reduced warmup on reinit (sensor already settled)
   int warmupFrames = isReinit ? 3 : 10;
   Serial.printf("[Camera] Warming up (%d frames)", warmupFrames);
   for (int i = 0; i < warmupFrames; i++) {
@@ -146,16 +156,18 @@ inline bool cameraInit(bool isReinit = false) {
     delay(isReinit ? 30 : 80);
   }
 
+  // Apply NVS-loaded sensor tuning (brightness, AEC, WB, flips, etc.)
+  applySensorSettings();
+
+  // Confirm actual output dimensions
   {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
       uint16_t w = 0, h = 0;
       if (jpegSOFDims(fb->buf, fb->len, &w, &h) && w > 0 && h > 0) {
-        camWidth  = w;
-        camHeight = h;
+        camWidth = w; camHeight = h;
       } else {
-        camWidth  = fb->width;
-        camHeight = fb->height;
+        camWidth = fb->width; camHeight = fb->height;
       }
       Serial.printf("\n[Camera] Ready — %uMHz %s %ux%u\n",
         cfg.xclkMhz, psramFound() ? "PSRAM" : "DRAM", camWidth, camHeight);
@@ -184,25 +196,17 @@ inline uint32_t bufferClipDurationMs() {
 inline bool bufferAppendFrame() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return false;
-
-  // Duplicate guard: skip if sensor DMA buffer hasn't refreshed
   static size_t   lastLen  = 0;
   static uint32_t lastTail = 0;
   uint32_t thisTail = 0;
-  if (fb->len >= 4)
-    memcpy(&thisTail, fb->buf + fb->len - 4, 4);
+  if (fb->len >= 4) memcpy(&thisTail, fb->buf + fb->len - 4, 4);
   if (fb->len == lastLen && thisTail == lastTail) {
     esp_camera_fb_return(fb);
     return false;
   }
-  lastLen  = fb->len;
-  lastTail = thisTail;
-
+  lastLen = fb->len; lastTail = thisTail;
   uint8_t* copy = (uint8_t*)heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (copy) {
-    memcpy(copy, fb->buf, fb->len);
-    frameBuffer.push_back({ copy, fb->len, millis() });
-  }
+  if (copy) { memcpy(copy, fb->buf, fb->len); frameBuffer.push_back({ copy, fb->len, millis() }); }
   esp_camera_fb_return(fb);
   return copy != nullptr;
 }
@@ -220,31 +224,6 @@ inline bool cameraReinit() {
   esp_camera_deinit();
   delay(100);
   return cameraInit(true);
-}
-
-// Apply all sensor tuning params from cfg to the live sensor.
-// Call after cameraInit() and after any /save that touches sensor fields.
-// No camera reinit required — the sensor API updates registers live.
-inline void cameraSensorApply() {
-  sensor_t* s = esp_camera_sensor_get();
-  if (!s) return;
-  s->set_brightness(s,    cfg.camBrightness);
-  s->set_contrast(s,      cfg.camContrast);
-  s->set_saturation(s,    cfg.camSaturation);
-  s->set_sharpness(s,     cfg.camSharpness);
-  s->set_denoise(s,       cfg.camDenoise);
-  s->set_exposure_ctrl(s, cfg.camAec);
-  if (!cfg.camAec) s->set_aec_value(s, cfg.camAecVal);
-  s->set_gain_ctrl(s,     cfg.camGain);
-  if (!cfg.camGain) s->set_agc_gain(s, cfg.camGainCtrl);
-  s->set_whitebal(s,      cfg.camAwb);
-  s->set_awb_gain(s,      cfg.camAwbGain);
-  s->set_wb_mode(s,       cfg.camWbMode);
-  s->set_vflip(s,         cfg.camVflip);
-  s->set_hmirror(s,       cfg.camHflip);
-  s->set_lenc(s,          cfg.camLenc);
-  s->set_dcw(s,           cfg.camDcw);
-  Serial.println("[Camera] Sensor params applied");
 }
 
 inline bool cameraOk()           { return camReady; }

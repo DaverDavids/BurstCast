@@ -21,13 +21,44 @@ button{background:#0f0;color:#000;border:none;padding:.5em;cursor:pointer;font-w
 </form></body></html>
 )rawhtml";
 
+// Helper: emit a labeled range slider with a live value readout.
+// name   = form field name & element id prefix
+// label  = display label
+// mn/mx  = min/max
+// val    = current value (int)
+// full   = true -> full width (single col), false -> used inside .row grid
+static void addSlider(String& h, const char* name, const char* label,
+                      int mn, int mx, int val) {
+  h += "<label>";
+  h += label;
+  h += " <span id='v_";
+  h += name;
+  h += "' style='color:#0f0'>";
+  h += val;
+  h += "</span><br>"
+       "<input type='range' name='";
+  h += name;
+  h += "' id='";
+  h += name;
+  h += "' min='";
+  h += mn;
+  h += "' max='";
+  h += mx;
+  h += "' value='";
+  h += val;
+  h += "' oninput=\"document.getElementById('v_";
+  h += name;
+  h += "').textContent=this.value\" style='width:100%'></label>";
+}
+
 String buildConfigPage(bool camOk) {
   uint8_t fs = cfg.frameSize < 13 ? cfg.frameSize : 6;
   static const uint16_t FW[] = {160,176,240,240,320,400,480,640,800,1024,1280,1280,1600};
   static const uint16_t FH[] = {120,144,176,240,240,296,320,480,600, 768, 720,1024,1200};
 
   String h;
-  h.reserve(6500);
+  h.reserve(9000);
+
   h += F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
          "<meta name='viewport' content='width=device-width,initial-scale=1'>"
          "<title>BurstCast</title>"
@@ -36,7 +67,11 @@ String buildConfigPage(bool camOk) {
          "h1{color:#0f0;margin:0 0 .5em}h2{color:#0a0;font-size:.9em;margin:1em 0 .4em}"
          ".card{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:1em;margin-bottom:1em;max-width:600px}"
          "label{display:block;margin:.4em 0;font-size:.85em}"
-         "input,select{background:#000;color:#0f0;border:1px solid #444;padding:.3em .5em;font-family:monospace;width:100%;box-sizing:border-box}"
+         "input[type=text],input[type=number],input[type=password],select{"
+         "  background:#000;color:#0f0;border:1px solid #444;padding:.3em .5em;"
+         "  font-family:monospace;width:100%;box-sizing:border-box}"
+         "input[type=range]{accent-color:#0f0;cursor:pointer}"
+         "input[type=checkbox]{accent-color:#0f0;width:auto;cursor:pointer}"
          "input[type=password]{letter-spacing:.1em}"
          ".row{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
          "button{background:#0f0;color:#000;border:none;padding:.5em 1.2em;cursor:pointer;font-weight:bold;margin-top:.5em}"
@@ -46,13 +81,24 @@ String buildConfigPage(bool camOk) {
          ".ok{background:#0a0;color:#0f0}.fail{background:#500;color:#f00}"
          ".hint{color:#555;font-size:.78em;margin-top:.15em}"
          "#log{background:#000;border:1px solid #333;padding:.5em;height:80px;overflow-y:auto;font-size:.75em;color:#888}"
+         // Collapsible sensor section
+         "details{margin-top:.5em}"
+         "details summary{cursor:pointer;color:#0a0;font-size:.85em;user-select:none;padding:.2em 0;list-style:none}"
+         "details summary::-webkit-details-marker{display:none}"
+         "details summary::before{content:'\u25b6  ';font-size:.7em}"
+         "details[open] summary::before{content:'\u25bc  ';font-size:.7em}"
+         ".sensor-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5em;margin-top:.5em}"
+         ".sensor-full{grid-column:1/-1}"
+         ".manual-row{margin-top:.3em;padding:.3em .5em;background:#111;border-left:2px solid #333;font-size:.82em}"
          "</style></head><body>");
 
   h += F("<h1>&#127909; BurstCast</h1>");
 
   // Status bar
   h += F("<div class='card'>");
-  h += "<span class='status "; h += camOk ? "ok'>Cam OK" : "fail'>Cam FAIL"; h += "</span> ";
+  h += "<span class='status ";
+  h += camOk ? "ok'>Cam OK" : "fail'>Cam FAIL";
+  h += "</span> ";
   h += "<span id='bstatus' class='status sec'>Idle</span> ";
   h += "<span id='rssi' style='font-size:.8em;color:#555'></span>";
   h += F("</div>");
@@ -89,12 +135,9 @@ String buildConfigPage(bool camOk) {
          "<label>Source Visible (sec)<input name='visibleSecs' type='number' min='0' max='3600'"
          " id='visSecs' value='");
   h += cfg.visibleSecs;
-  h += F("'>"
-         "<div class='hint' id='visHint'></div></label>"
-         "<div style='padding-top:1.4em;font-size:.8em;color:#555'>"
-         "0 = auto (matches clip length)</div>"
-         "</div>"
-         "</div>");
+  h += F("'><div class='hint' id='visHint'></div></label>"
+         "<div style='padding-top:1.4em;font-size:.8em;color:#555'>0 = auto (matches clip length)</div>"
+         "</div></div>");
 
   // Camera settings
   h += F("<div class='card'><h2>Camera</h2><div class='row'>"
@@ -107,9 +150,8 @@ String buildConfigPage(bool camOk) {
   for (int i = 0; i < 13; i++) {
     h += "<option value='";
     h += i;
-    h += "'";
-    if (i == cfg.frameSize) h += " selected";
-    h += ">";
+    if (i == cfg.frameSize) h += "' selected>";
+    else h += "'>";
     h += sizeNames[i];
     h += "</option>";
   }
@@ -126,7 +168,88 @@ String buildConfigPage(bool camOk) {
          "<label>Burst Frames<input name='burstFrames' type='number' min='1' max='900'"
          " id='bfin' value='");
   h += cfg.burstFrames;
-  h += F("'> <span style='color:#555;font-size:.8em' id='bdur'></span></label></div>");
+  h += F("'> <span style='color:#555;font-size:.8em' id='bdur'></span></label>");
+
+  // ---- Sensor Tuning (collapsible) ----
+  h += F("<details id='sensorDetails'>"
+         "<summary>Sensor Tuning</summary>"
+         "<div class='sensor-grid'>");
+
+  // Sliders — brightness, contrast, saturation, sharpness (each -2..2)
+  // These go in the 2-col grid so two per row
+  addSlider(h, "camBright",   "Brightness (-2..2)",  -2, 2, cfg.camBrightness);
+  addSlider(h, "camContrast", "Contrast (-2..2)",    -2, 2, cfg.camContrast);
+  addSlider(h, "camSat",      "Saturation (-2..2)",  -2, 2, cfg.camSaturation);
+  addSlider(h, "camSharp",    "Sharpness (-2..2)",   -2, 2, cfg.camSharpness);
+  addSlider(h, "camDenoise",  "Denoise (0..8)",       0, 8, cfg.camDenoise);
+
+  // Exposure control
+  h += F("<div class='sensor-full'>"
+         "<label><input type='checkbox' name='camAec' id='camAec'");
+  if (cfg.camAec) h += " checked";
+  h += F(" onchange=\"document.getElementById('aecManual').style.display=this.checked?'none':'block'\">"
+         " Auto Exposure (AEC)</label>"
+         "<div class='manual-row' id='aecManual' style='display:");
+  h += cfg.camAec ? "none" : "block";
+  h += F("'>");
+  addSlider(h, "camAecVal", "Manual Exposure (0..1200)", 0, 1200, cfg.camAecVal);
+  h += F("</div></div>");
+
+  // Gain control
+  h += F("<div class='sensor-full'>"
+         "<label><input type='checkbox' name='camGain' id='camGain'");
+  if (cfg.camGain) h += " checked";
+  h += F(" onchange=\"document.getElementById('gainManual').style.display=this.checked?'none':'block'\">"
+         " Auto Gain (AGC)</label>"
+         "<div class='manual-row' id='gainManual' style='display:");
+  h += cfg.camGain ? "none" : "block";
+  h += F("'>");
+  addSlider(h, "camGainCtrl", "Manual Gain (0..30)", 0, 30, cfg.camGainCtrl);
+  h += F("</div></div>");
+
+  // White balance
+  h += F("<div class='sensor-full'>"
+         "<label><input type='checkbox' name='camAwb' id='camAwb'");
+  if (cfg.camAwb) h += " checked";
+  h += F("> Auto White Balance</label>"
+         "<label><input type='checkbox' name='camAwbGain' id='camAwbGain'");
+  if (cfg.camAwbGain) h += " checked";
+  h += F("> AWB Gain</label>"
+         "<label>WB Mode"
+         "<select name='camWbMode'>"
+         "<option value='0'");
+  if (cfg.camWbMode==0) h += " selected";
+  h += F(">Auto</option><option value='1'");
+  if (cfg.camWbMode==1) h += " selected";
+  h += F(">Sunny</option><option value='2'");
+  if (cfg.camWbMode==2) h += " selected";
+  h += F(">Cloudy</option><option value='3'");
+  if (cfg.camWbMode==3) h += " selected";
+  h += F(">Office</option><option value='4'");
+  if (cfg.camWbMode==4) h += " selected";
+  h += F(">Home</option></select></label></div>");
+
+  // Flip / correction
+  h += F("<label><input type='checkbox' name='camVflip'");
+  if (cfg.camVflip) h += " checked";
+  h += F("> Vertical Flip</label>"
+         "<label><input type='checkbox' name='camHflip'");
+  if (cfg.camHflip) h += " checked";
+  h += F("> Horizontal Mirror</label>"
+         "<label><input type='checkbox' name='camLenc'");
+  if (cfg.camLenc) h += " checked";
+  h += F("> Lens Correction</label>"
+         "<label><input type='checkbox' name='camDcw'");
+  if (cfg.camDcw) h += " checked";
+  h += F("> Downsize EN (DCW)</label>");
+
+  // Apply Now button — sends sensor fields to /sensorapply without full save
+  h += F("<div class='sensor-full' style='margin-top:.5em'>"
+         "<button type='button' class='sec' onclick='applyNow()'>&#9881; Apply Now (no save)</button>"
+         "</div>");
+
+  h += F("</div></details>"); // end sensor-grid + details
+  h += F("</div>");            // end Camera card
 
   // Trigger / network
   h += F("<div class='card'><h2>Trigger</h2>"
@@ -151,7 +274,17 @@ String buildConfigPage(bool camOk) {
          "  const f=document.getElementById('cfg');"
          "  const d=new URLSearchParams(new FormData(f));"
          "  fetch('/save',{method:'POST',body:d})"
-         "  .then(r=>r.json()).then(j=>alert(j.ok?'Saved! Reconnecting...':'Error'));"
+         "  .then(r=>r.json()).then(j=>alert(j.ok?'Saved!':'Error'));"
+         "}"
+         "function applyNow(){"
+         "  const f=document.getElementById('cfg');"
+         "  const d=new URLSearchParams(new FormData(f));"
+         "  fetch('/sensorapply',{method:'POST',body:d})"
+         "  .then(r=>r.json()).then(j=>{"
+         "    const btn=document.querySelector('button.sec[onclick=\'applyNow()\']');"
+         "    if(btn){const orig=btn.textContent;btn.textContent=j.ok?'\u2713 Applied':'\u2717 Failed';"
+         "    setTimeout(()=>btn.textContent=orig,2000);}"
+         "  });"
          "}"
          "function updateStatus(){"
          "  fetch('/status').then(r=>r.json()).then(j=>{"
@@ -172,16 +305,21 @@ String buildConfigPage(bool camOk) {
          "function updateVisHint(){"
          "  const v=+document.getElementById('visSecs').value;"
          "  const hint=document.getElementById('visHint');"
-         "  if(v===0){"
-         "    hint.textContent='auto: '+clipDur().toFixed(1)+'s';"
-         "  } else {"
-         "    hint.textContent=v+'s manual';"
-         "  }"
+         "  if(v===0){hint.textContent='auto: '+clipDur().toFixed(1)+'s';}"
+         "  else{hint.textContent=v+'s manual';}"
          "}"
+         // Restore sensor details open state across page reloads
+         "(function(){"
+         "  if(sessionStorage.getItem('sensorOpen')==='1')"
+         "    document.getElementById('sensorDetails').open=true;"
+         "  document.getElementById('sensorDetails').addEventListener('toggle',function(){"
+         "    sessionStorage.setItem('sensorOpen',this.open?'1':'0');"
+         "  });"
+         "})();"
          "document.getElementById('bfin').addEventListener('input',updateDur);"
          "document.getElementById('fpsin').addEventListener('input',updateDur);"
          "document.getElementById('visSecs').addEventListener('input',updateVisHint);"
-         "updateDur(); updateVisHint(); setInterval(updateStatus,2000);"
+         "updateDur();updateVisHint();setInterval(updateStatus,2000);"
          "</script></body></html>");
   return h;
 }
