@@ -23,23 +23,20 @@
 #define CAM_PIN_HREF     7
 #define CAM_PIN_PCLK    13
 
-// Maps UI dropdown index (0-12) to the correct framesize_t enum value.
-// The framesize_t enum starts at FRAMESIZE_96X96=0, so QQVGA=1, QCIF=2, etc.
-// Our UI skips 96x96, so index 0 = QQVGA = enum value 1.
 static const framesize_t FRAMESIZE_MAP[] = {
-  FRAMESIZE_QQVGA,    // 0  -> 160x120
-  FRAMESIZE_QCIF,     // 1  -> 176x144
-  FRAMESIZE_HQVGA,    // 2  -> 240x176
-  FRAMESIZE_240X240,  // 3  -> 240x240
-  FRAMESIZE_QVGA,     // 4  -> 320x240
-  FRAMESIZE_CIF,      // 5  -> 400x296
-  FRAMESIZE_HVGA,     // 6  -> 480x320
-  FRAMESIZE_VGA,      // 7  -> 640x480
-  FRAMESIZE_SVGA,     // 8  -> 800x600
-  FRAMESIZE_XGA,      // 9  -> 1024x768
-  FRAMESIZE_HD,       // 10 -> 1280x720
-  FRAMESIZE_SXGA,     // 11 -> 1280x1024
-  FRAMESIZE_UXGA,     // 12 -> 1600x1200
+  FRAMESIZE_QQVGA,
+  FRAMESIZE_QCIF,
+  FRAMESIZE_HQVGA,
+  FRAMESIZE_240X240,
+  FRAMESIZE_QVGA,
+  FRAMESIZE_CIF,
+  FRAMESIZE_HVGA,
+  FRAMESIZE_VGA,
+  FRAMESIZE_SVGA,
+  FRAMESIZE_XGA,
+  FRAMESIZE_HD,
+  FRAMESIZE_SXGA,
+  FRAMESIZE_UXGA,
 };
 #define FRAMESIZE_MAP_COUNT 13
 
@@ -107,21 +104,18 @@ inline bool cameraInit(bool isReinit = false) {
   cam.xclk_freq_hz = (uint32_t)cfg.xclkMhz * 1000000;
   cam.pixel_format = PIXFORMAT_JPEG;
   cam.jpeg_quality = cfg.jpegQuality;
-  cam.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   cam.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
-  // Always init at UXGA so the DMA buffer is maximally allocated and the
-  // OV3660 scaler initialises correctly; then downscale via set_framesize().
+  // Always use GRAB_LATEST on both paths to minimise latency
   if (psramFound()) {
     cam.frame_size   = FRAMESIZE_UXGA;
     cam.jpeg_quality = 10;
     cam.fb_count     = 2;
-    cam.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
     cam.frame_size = FRAMESIZE_SVGA;
     cam.fb_count   = 1;
-    cam.grab_mode  = CAMERA_GRAB_LATEST;   // Always grab freshest frame
   }
+  cam.grab_mode = CAMERA_GRAB_LATEST;
 
   esp_err_t err = esp_camera_init(&cam);
   if (err != ESP_OK) {
@@ -135,15 +129,6 @@ inline bool cameraInit(bool isReinit = false) {
     return false;
   }
 
-  // OV3660-specific tuning (matches reference)
-  if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);
-    s->set_brightness(s, 1);
-    s->set_saturation(s, 2);
-  }
-
-  // Downscale to the user's configured target resolution using the correct
-  // enum value from FRAMESIZE_MAP (fixes the off-by-one index bug).
   framesize_t target = (cfg.frameSize < FRAMESIZE_MAP_COUNT)
                        ? FRAMESIZE_MAP[cfg.frameSize]
                        : FRAMESIZE_VGA;
@@ -151,9 +136,7 @@ inline bool cameraInit(bool isReinit = false) {
     s->set_framesize(s, target);
   }
 
-  // Warmup: on cold boot run 10 frames (800 ms) so AE/AWB settle.
-  // On a hot reinit (resolution/xclk change) only 3 frames are needed —
-  // the sensor is already running, so exposure converges much faster.
+  // Reduced warmup on reinit (sensor already settled)
   int warmupFrames = isReinit ? 3 : 10;
   Serial.printf("[Camera] Warming up (%d frames)", warmupFrames);
   for (int i = 0; i < warmupFrames; i++) {
@@ -163,7 +146,6 @@ inline bool cameraInit(bool isReinit = false) {
     delay(isReinit ? 30 : 80);
   }
 
-  // Confirm actual output dimensions from a live frame
   {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
@@ -185,7 +167,7 @@ inline bool cameraInit(bool isReinit = false) {
   return true;
 }
 
-// ---- Buffer functions (must come before cameraReinit) ----
+// ---- Buffer functions ----
 
 inline void bufferClear() {
   for (auto& f : frameBuffer)
@@ -194,9 +176,6 @@ inline void bufferClear() {
   playbackIdx = 0;
 }
 
-// Returns the actual wall-clock duration of the captured clip in ms.
-// Uses first/last captureMs timestamps so the result reflects real sensor rate,
-// not the configured cfg.fps value. Returns 0 if < 2 frames captured.
 inline uint32_t bufferClipDurationMs() {
   if (frameBuffer.size() < 2) return 0;
   return frameBuffer.back().captureMs - frameBuffer.front().captureMs;
@@ -206,11 +185,7 @@ inline bool bufferAppendFrame() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return false;
 
-  // Duplicate guard: skip if this is the same buffer the sensor returned last
-  // time (i.e. no new frame has been produced yet). Check last 4 bytes of the
-  // JPEG bitstream — they change with every unique frame even for static scenes
-  // due to entropy coding variance; identical bytes means the DMA hasn't
-  // refreshed the buffer.
+  // Duplicate guard: skip if sensor DMA buffer hasn't refreshed
   static size_t   lastLen  = 0;
   static uint32_t lastTail = 0;
   uint32_t thisTail = 0;
@@ -218,7 +193,7 @@ inline bool bufferAppendFrame() {
     memcpy(&thisTail, fb->buf + fb->len - 4, 4);
   if (fb->len == lastLen && thisTail == lastTail) {
     esp_camera_fb_return(fb);
-    return false;   // sensor hasn't delivered a new frame yet
+    return false;
   }
   lastLen  = fb->len;
   lastTail = thisTail;
@@ -239,14 +214,37 @@ inline const FrameEntry* bufferNextFrame() {
   return f;
 }
 
-// Full deinit + reinit — required when changing resolution or XCLK at runtime.
-// Defined after bufferClear() so that function is already declared.
 inline bool cameraReinit() {
   camReady = false;
   bufferClear();
   esp_camera_deinit();
   delay(100);
   return cameraInit(true);
+}
+
+// Apply all sensor tuning params from cfg to the live sensor.
+// Call after cameraInit() and after any /save that touches sensor fields.
+// No camera reinit required — the sensor API updates registers live.
+inline void cameraSensorApply() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return;
+  s->set_brightness(s,    cfg.camBrightness);
+  s->set_contrast(s,      cfg.camContrast);
+  s->set_saturation(s,    cfg.camSaturation);
+  s->set_sharpness(s,     cfg.camSharpness);
+  s->set_denoise(s,       cfg.camDenoise);
+  s->set_exposure_ctrl(s, cfg.camAec);
+  if (!cfg.camAec) s->set_aec_value(s, cfg.camAecVal);
+  s->set_gain_ctrl(s,     cfg.camGain);
+  if (!cfg.camGain) s->set_agc_gain(s, cfg.camGainCtrl);
+  s->set_whitebal(s,      cfg.camAwb);
+  s->set_awb_gain(s,      cfg.camAwbGain);
+  s->set_wb_mode(s,       cfg.camWbMode);
+  s->set_vflip(s,         cfg.camVflip);
+  s->set_hmirror(s,       cfg.camHflip);
+  s->set_lenc(s,          cfg.camLenc);
+  s->set_dcw(s,           cfg.camDcw);
+  Serial.println("[Camera] Sensor params applied");
 }
 
 inline bool cameraOk()           { return camReady; }
