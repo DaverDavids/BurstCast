@@ -4,7 +4,7 @@
 // ============================================================
 #include <WiFiServer.h>
 #include <WiFiClient.h>
-#include <CStreamer.h>
+#include "Micro-RTSP/src/CStreamer.h"
 #include <esp_camera.h>
 #include "camera.h"
 #include "config.h"
@@ -66,21 +66,35 @@ static const uint8_t* stripBadMarkers(const uint8_t* src, size_t srcLen, size_t*
 
 class BurstStreamer : public CStreamer {
 public:
-  BurstStreamer(u_short w, u_short h) : CStreamer(w, h) {}
+  BurstStreamer(u_short w, u_short h) : CStreamer(w, h), m_baseCaptureMs(0) {}
 
   virtual uint8_t getFps() override { return cfg.fps; }
 
   virtual void streamImage(uint32_t curMsec) override {
     if (burstState == STATE_LOOPING && bufferFrameCount() > 0) {
       const FrameEntry* f = bufferNextFrame();
-      if (f && f->buf) sendClean(f->buf, f->len, curMsec);
+      if (f && f->buf) {
+        if (m_baseCaptureMs == 0) {
+          m_baseCaptureMs = f->captureMs;
+          m_basePlaybackMs = curMsec;
+          m_prevMsec = m_basePlaybackMs;
+          m_Timestamp = 0;
+        }
+        // Synthesize time that reflects the actual capture timeline
+        uint32_t capDelta = f->captureMs - m_baseCaptureMs;
+        sendClean(f->buf, f->len, m_basePlaybackMs + capDelta);
+      }
     } else {
+      m_baseCaptureMs = 0;
       camera_fb_t* fb = esp_camera_fb_get();
       if (fb) { sendClean(fb->buf, fb->len, curMsec); esp_camera_fb_return(fb); }
     }
   }
 
 private:
+  uint32_t m_baseCaptureMs;
+  uint32_t m_basePlaybackMs;
+
   void sendClean(const uint8_t* buf, size_t len, uint32_t ms) {
     size_t cleanLen = 0;
     const uint8_t* clean = stripBadMarkers(buf, len, &cleanLen);

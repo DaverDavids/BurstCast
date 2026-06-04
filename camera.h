@@ -46,6 +46,7 @@ static const framesize_t FRAMESIZE_MAP[] = {
 struct FrameEntry {
   uint8_t* buf;
   size_t   len;
+  uint32_t captureMs;
 };
 
 static std::vector<FrameEntry> frameBuffer;
@@ -195,7 +196,7 @@ inline bool bufferAppendFrame() {
   uint8_t* copy = (uint8_t*)heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (copy) {
     memcpy(copy, fb->buf, fb->len);
-    frameBuffer.push_back({ copy, fb->len });
+    frameBuffer.push_back({ copy, fb->len, millis() });
   }
   esp_camera_fb_return(fb);
   return copy != nullptr;

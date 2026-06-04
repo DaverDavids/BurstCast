@@ -18,6 +18,10 @@
 #include "obsws.h"
 #include "html.h"
 
+// Bundle Micro-RTSP sources directly so Arduino compiles them
+#include "Micro-RTSP/src/CStreamer.cpp"
+#include "Micro-RTSP/src/CRtspSession.cpp"
+
 Preferences prefs;
 WebServer   webServer(80);
 DNSServer   dnsServer;
