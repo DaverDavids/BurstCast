@@ -78,7 +78,7 @@ static bool jpegSOFDims(const uint8_t* buf, size_t len, uint16_t* w, uint16_t* h
   return false;
 }
 
-inline bool cameraInit() {
+inline bool cameraInit(bool isReinit = false) {
   Serial.printf("[Camera] frameSize=%u (enum %u) xclkMhz=%u quality=%u\n",
     cfg.frameSize,
     cfg.frameSize < FRAMESIZE_MAP_COUNT ? (uint8_t)FRAMESIZE_MAP[cfg.frameSize] : 0xff,
@@ -120,6 +120,7 @@ inline bool cameraInit() {
   } else {
     cam.frame_size = FRAMESIZE_SVGA;
     cam.fb_count   = 1;
+    cam.grab_mode  = CAMERA_GRAB_LATEST;   // Always grab freshest frame
   }
 
   esp_err_t err = esp_camera_init(&cam);
@@ -150,13 +151,16 @@ inline bool cameraInit() {
     s->set_framesize(s, target);
   }
 
-  // Warmup: discard early frames while AE/AWB settle at the new window size
-  Serial.print("[Camera] Warming up");
-  for (int i = 0; i < 10; i++) {
+  // Warmup: on cold boot run 10 frames (800 ms) so AE/AWB settle.
+  // On a hot reinit (resolution/xclk change) only 3 frames are needed —
+  // the sensor is already running, so exposure converges much faster.
+  int warmupFrames = isReinit ? 3 : 10;
+  Serial.printf("[Camera] Warming up (%d frames)", warmupFrames);
+  for (int i = 0; i < warmupFrames; i++) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) esp_camera_fb_return(fb);
     Serial.print(".");
-    delay(80);
+    delay(isReinit ? 30 : 80);
   }
 
   // Confirm actual output dimensions from a live frame
@@ -216,7 +220,7 @@ inline bool cameraReinit() {
   bufferClear();
   esp_camera_deinit();
   delay(100);
-  return cameraInit();
+  return cameraInit(true);
 }
 
 inline bool cameraOk()           { return camReady; }
