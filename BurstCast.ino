@@ -83,7 +83,6 @@ void saveConfig() {
   prefs.putUChar ("fps",        cfg.fps);
   prefs.putUChar ("xclkMhz",    cfg.xclkMhz);
   prefs.putUShort("visibleSecs",cfg.visibleSecs);
-  // Sensor tuning
   prefs.putChar  ("camBright",  cfg.camBrightness);
   prefs.putChar  ("camContrast",cfg.camContrast);
   prefs.putChar  ("camSat",     cfg.camSaturation);
@@ -144,26 +143,26 @@ void handleObsHide() {
   if (millis() >= showUntilMs) { obsSetSourceVisible(false); obsHideArmed = false; }
 }
 
-// Parse sensor fields from the active webServer args into cfg.
-// Used by both /save and /sensorapply.
+// Parse sensor fields from POST body into cfg.
+// Uses toInt() on the explicit string value — works correctly with the
+// hidden-input-fallback pattern (always receives '0' or '1').
 static void parseSensorArgs() {
   if (webServer.hasArg("camBright"))   cfg.camBrightness = webServer.arg("camBright").toInt();
   if (webServer.hasArg("camContrast")) cfg.camContrast   = webServer.arg("camContrast").toInt();
   if (webServer.hasArg("camSat"))      cfg.camSaturation = webServer.arg("camSat").toInt();
   if (webServer.hasArg("camSharp"))    cfg.camSharpness  = webServer.arg("camSharp").toInt();
   if (webServer.hasArg("camDenoise"))  cfg.camDenoise    = webServer.arg("camDenoise").toInt();
-  // AEC — checkbox: present=1, absent=0
-  cfg.camAec = webServer.hasArg("camAec") ? 1 : 0;
+  if (webServer.hasArg("camAec"))      cfg.camAec        = webServer.arg("camAec").toInt();
   if (webServer.hasArg("camAecVal"))   cfg.camAecVal     = webServer.arg("camAecVal").toInt();
-  cfg.camGain = webServer.hasArg("camGain") ? 1 : 0;
+  if (webServer.hasArg("camGain"))     cfg.camGain       = webServer.arg("camGain").toInt();
   if (webServer.hasArg("camGainCtrl")) cfg.camGainCtrl   = webServer.arg("camGainCtrl").toInt();
-  cfg.camAwb    = webServer.hasArg("camAwb")    ? 1 : 0;
-  cfg.camAwbGain= webServer.hasArg("camAwbGain")? 1 : 0;
+  if (webServer.hasArg("camAwb"))      cfg.camAwb        = webServer.arg("camAwb").toInt();
+  if (webServer.hasArg("camAwbGain"))  cfg.camAwbGain    = webServer.arg("camAwbGain").toInt();
   if (webServer.hasArg("camWbMode"))   cfg.camWbMode     = webServer.arg("camWbMode").toInt();
-  cfg.camVflip  = webServer.hasArg("camVflip")  ? 1 : 0;
-  cfg.camHflip  = webServer.hasArg("camHflip")  ? 1 : 0;
-  cfg.camLenc   = webServer.hasArg("camLenc")   ? 1 : 0;
-  cfg.camDcw    = webServer.hasArg("camDcw")    ? 1 : 0;
+  if (webServer.hasArg("camVflip"))    cfg.camVflip      = webServer.arg("camVflip").toInt();
+  if (webServer.hasArg("camHflip"))    cfg.camHflip      = webServer.arg("camHflip").toInt();
+  if (webServer.hasArg("camLenc"))     cfg.camLenc       = webServer.arg("camLenc").toInt();
+  if (webServer.hasArg("camDcw"))      cfg.camDcw        = webServer.arg("camDcw").toInt();
 }
 
 // ============================================================
@@ -233,7 +232,6 @@ void setupWebServer() {
   webServer.on("/save", HTTP_POST, []() {
     uint8_t oldFrameSize = cfg.frameSize;
     uint8_t oldXclkMhz  = cfg.xclkMhz;
-
     if (webServer.hasArg("obsWsIp"))       strlcpy(cfg.obsWsIp,       webServer.arg("obsWsIp").c_str(),       sizeof(cfg.obsWsIp));
     if (webServer.hasArg("obsWsPort"))     cfg.obsWsPort     = webServer.arg("obsWsPort").toInt();
     if (webServer.hasArg("obsWsPass"))     strlcpy(cfg.obsWsPass,     webServer.arg("obsWsPass").c_str(),     sizeof(cfg.obsWsPass));
@@ -248,28 +246,18 @@ void setupWebServer() {
     if (webServer.hasArg("visibleSecs"))   cfg.visibleSecs   = webServer.arg("visibleSecs").toInt();
     parseSensorArgs();
     saveConfig();
-
     bool needReinit = (cfg.frameSize != oldFrameSize || cfg.xclkMhz != oldXclkMhz);
     if (needReinit) {
-      Serial.printf("[Camera] Settings changed (frameSize %u->%u, xclk %u->%u) — reinitializing...\n",
+      Serial.printf("[Camera] Reinitializing (frameSize %u->%u, xclk %u->%u)\n",
         oldFrameSize, cfg.frameSize, oldXclkMhz, cfg.xclkMhz);
       burstState = STATE_IDLE;
-      if (cameraReinit()) {
-        rtspBegin(camWidth, camHeight);
-        Serial.printf("[Camera] Reinit OK — %ux%u\n", camWidth, camHeight);
-      } else {
-        Serial.println("[Camera] Reinit FAILED");
-      }
+      if (cameraReinit()) rtspBegin(camWidth, camHeight);
     } else {
-      // Only sensor tuning changed — apply live, no reinit needed.
       applySensorSettings();
     }
-
     webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
-  // Apply sensor settings live without saving to NVS.
-  // Used by the web UI 'Apply Now' button for live preview tuning.
   webServer.on("/sensorapply", HTTP_POST, []() {
     parseSensorArgs();
     bool ok = applySensorSettings();
@@ -282,22 +270,18 @@ void setupWebServer() {
   });
 
   webServer.on("/clearbuffer", HTTP_GET, []() {
-    bufferClear();
-    burstState = STATE_IDLE;
+    bufferClear(); burstState = STATE_IDLE;
     webServer.send(200, "application/json", "{\"ok\":true}");
   });
 
   webServer.on("/status", HTTP_GET, []() {
-    const char* s =
-      burstState == STATE_RECORDING ? "Recording" :
-      burstState == STATE_LOOPING   ? "Looping"   : "Idle";
+    const char* s = burstState==STATE_RECORDING?"Recording":burstState==STATE_LOOPING?"Looping":"Idle";
     char json[256];
     snprintf(json, sizeof(json),
       "{\"state\":\"%s\",\"frames\":%u,\"ip\":\"%s\",\"rssi\":%d,\"camOk\":%s,\"obsWs\":%s}",
       s, (unsigned)bufferFrameCount(),
       WiFi.localIP().toString().c_str(), WiFi.RSSI(),
-      cameraOk() ? "true" : "false",
-      obsWsReady() ? "true" : "false");
+      cameraOk()?"true":"false", obsWsReady()?"true":"false");
     webServer.send(200, "application/json", json);
   });
 
@@ -321,8 +305,7 @@ void setupWebServer() {
     uint32_t interval = cfg.fps > 0 ? 1000UL / cfg.fps : 66;
     uint32_t lastF = 0;
     while (client.connected()) {
-      webServer.handleClient();
-      ArduinoOTA.handle();
+      webServer.handleClient(); ArduinoOTA.handle();
       if (millis() - lastF < interval) { delay(2); continue; }
       lastF = millis();
       camera_fb_t* fb = esp_camera_fb_get();
