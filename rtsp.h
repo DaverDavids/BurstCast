@@ -68,6 +68,8 @@ class BurstStreamer : public CStreamer {
 public:
   BurstStreamer(u_short w, u_short h) : CStreamer(w, h) {}
 
+  virtual uint8_t getFps() override { return cfg.fps; }
+
   virtual void streamImage(uint32_t curMsec) override {
     if (burstState == STATE_LOOPING && bufferFrameCount() > 0) {
       const FrameEntry* f = bufferNextFrame();
@@ -92,6 +94,14 @@ static uint32_t       lastFrameMs = 0;
 
 // Call AFTER cameraInit() so camWidth/camHeight reflect actual sensor output.
 inline void rtspBegin(uint16_t w, uint16_t h) {
+  // Drop old streamer + sessions before reinit
+  if (streamer) {
+    delete streamer;
+    streamer = nullptr;
+  }
+  rtspServer.stop();
+  delay(50);
+
   rtspWidth  = w;
   rtspHeight = h;
   Serial.printf("[RTSP] Starting with %ux%u\n", rtspWidth, rtspHeight);
