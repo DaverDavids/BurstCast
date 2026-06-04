@@ -24,6 +24,24 @@
 #define DEFAULT_XCLK_MHZ      16
 #define DEFAULT_VISIBLE_SECS  0       // 0 = match clip duration automatically
 
+// Sensor tuning defaults (int8 range matches esp_camera sensor API)
+#define DEFAULT_CAM_BRIGHTNESS    0   // -2..2
+#define DEFAULT_CAM_CONTRAST      0   // -2..2
+#define DEFAULT_CAM_SATURATION    0   // -2..2
+#define DEFAULT_CAM_SHARPNESS     0   // -2..2
+#define DEFAULT_CAM_DENOISE       0   // 0..8
+#define DEFAULT_CAM_AEC           1   // 1=auto exposure on, 0=manual
+#define DEFAULT_CAM_AEC_VAL       300 // manual exposure (0-1200)
+#define DEFAULT_CAM_GAIN          1   // 1=auto gain on, 0=manual
+#define DEFAULT_CAM_GAIN_CTRL     0   // manual gain (0-30)
+#define DEFAULT_CAM_AWB           1   // 1=auto white balance on
+#define DEFAULT_CAM_AWB_GAIN      1   // 1=AWB gain enabled
+#define DEFAULT_CAM_WB_MODE       0   // 0=auto,1=sunny,2=cloudy,3=office,4=home
+#define DEFAULT_CAM_VFLIP         0
+#define DEFAULT_CAM_HFLIP         0
+#define DEFAULT_CAM_LENC          1   // lens correction
+#define DEFAULT_CAM_DCW           1   // downsize EN
+
 // States
 typedef enum {
   STATE_IDLE,        // no frames recorded yet, RTSP sends live passthrough
@@ -52,9 +70,25 @@ struct Config {
   uint8_t  xclkMhz;
 
   // OBS source visibility
-  // 0 = auto (source stays visible for exactly the clip duration)
-  // >0 = manual override in whole seconds
   uint16_t visibleSecs;
+
+  // Sensor tuning
+  int8_t   camBrightness;   // -2..2
+  int8_t   camContrast;     // -2..2
+  int8_t   camSaturation;   // -2..2
+  int8_t   camSharpness;    // -2..2
+  uint8_t  camDenoise;      // 0..8
+  uint8_t  camAec;          // 1=auto exposure
+  uint16_t camAecVal;       // manual exposure value 0-1200
+  uint8_t  camGain;         // 1=auto gain
+  uint8_t  camGainCtrl;     // manual gain 0-30
+  uint8_t  camAwb;          // 1=auto white balance
+  uint8_t  camAwbGain;      // 1=AWB gain enabled
+  uint8_t  camWbMode;       // 0=auto,1=sunny,2=cloudy,3=office,4=home
+  uint8_t  camVflip;        // 0/1
+  uint8_t  camHflip;        // 0/1
+  uint8_t  camLenc;         // lens correction 0/1
+  uint8_t  camDcw;          // downsize EN 0/1
 };
 
 inline Config cfg = {
@@ -72,6 +106,22 @@ inline Config cfg = {
   .fps           = DEFAULT_FPS,
   .xclkMhz       = DEFAULT_XCLK_MHZ,
   .visibleSecs   = DEFAULT_VISIBLE_SECS,
+  .camBrightness = DEFAULT_CAM_BRIGHTNESS,
+  .camContrast   = DEFAULT_CAM_CONTRAST,
+  .camSaturation = DEFAULT_CAM_SATURATION,
+  .camSharpness  = DEFAULT_CAM_SHARPNESS,
+  .camDenoise    = DEFAULT_CAM_DENOISE,
+  .camAec        = DEFAULT_CAM_AEC,
+  .camAecVal     = DEFAULT_CAM_AEC_VAL,
+  .camGain       = DEFAULT_CAM_GAIN,
+  .camGainCtrl   = DEFAULT_CAM_GAIN_CTRL,
+  .camAwb        = DEFAULT_CAM_AWB,
+  .camAwbGain    = DEFAULT_CAM_AWB_GAIN,
+  .camWbMode     = DEFAULT_CAM_WB_MODE,
+  .camVflip      = DEFAULT_CAM_VFLIP,
+  .camHflip      = DEFAULT_CAM_HFLIP,
+  .camLenc       = DEFAULT_CAM_LENC,
+  .camDcw        = DEFAULT_CAM_DCW,
 };
 
 inline BurstState burstState = STATE_IDLE;
