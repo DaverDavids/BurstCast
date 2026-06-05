@@ -46,15 +46,10 @@ static void addSlider(String& h, const char* name, const char* label,
   h += "').textContent=this.value\" style='width:100%'></label>";
 }
 
-// Emit a checkbox with a preceding hidden input of the same name=0 so that
-// when the checkbox is unchecked the form still submits an explicit '0'.
-// When checked, URLSearchParams takes the last same-name value which is '1'.
+// Emit a checkbox without a hidden fallback — the server handler defaults
+// absent checkboxes to 0, so we don't need the duplicate-name trick.
 static void addCheck(String& h, const char* name, const char* label, bool checked,
                      const char* onchange = nullptr) {
-  // Hidden fallback: always submits 0 unless checkbox overrides it
-  h += "<input type='hidden' name='";
-  h += name;
-  h += "' value='0'>";
   h += "<label><input type='checkbox' name='";
   h += name;
   h += "' value='1'";

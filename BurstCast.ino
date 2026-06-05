@@ -152,17 +152,17 @@ static void parseSensorArgs() {
   if (webServer.hasArg("camSat"))      cfg.camSaturation = webServer.arg("camSat").toInt();
   if (webServer.hasArg("camSharp"))    cfg.camSharpness  = webServer.arg("camSharp").toInt();
   if (webServer.hasArg("camDenoise"))  cfg.camDenoise    = webServer.arg("camDenoise").toInt();
-  if (webServer.hasArg("camAec"))      cfg.camAec        = webServer.arg("camAec").toInt();
+  cfg.camAec      = webServer.hasArg("camAec")     ? webServer.arg("camAec").toInt()     : 0;
   if (webServer.hasArg("camAecVal"))   cfg.camAecVal     = webServer.arg("camAecVal").toInt();
-  if (webServer.hasArg("camGain"))     cfg.camGain       = webServer.arg("camGain").toInt();
+  cfg.camGain     = webServer.hasArg("camGain")    ? webServer.arg("camGain").toInt()    : 0;
   if (webServer.hasArg("camGainCtrl")) cfg.camGainCtrl   = webServer.arg("camGainCtrl").toInt();
-  if (webServer.hasArg("camAwb"))      cfg.camAwb        = webServer.arg("camAwb").toInt();
-  if (webServer.hasArg("camAwbGain"))  cfg.camAwbGain    = webServer.arg("camAwbGain").toInt();
+  cfg.camAwb      = webServer.hasArg("camAwb")     ? webServer.arg("camAwb").toInt()     : 0;
+  cfg.camAwbGain  = webServer.hasArg("camAwbGain") ? webServer.arg("camAwbGain").toInt() : 0;
   if (webServer.hasArg("camWbMode"))   cfg.camWbMode     = webServer.arg("camWbMode").toInt();
-  if (webServer.hasArg("camVflip"))    cfg.camVflip      = webServer.arg("camVflip").toInt();
-  if (webServer.hasArg("camHflip"))    cfg.camHflip      = webServer.arg("camHflip").toInt();
-  if (webServer.hasArg("camLenc"))     cfg.camLenc       = webServer.arg("camLenc").toInt();
-  if (webServer.hasArg("camDcw"))      cfg.camDcw        = webServer.arg("camDcw").toInt();
+  cfg.camVflip    = webServer.hasArg("camVflip")   ? webServer.arg("camVflip").toInt()   : 0;
+  cfg.camHflip    = webServer.hasArg("camHflip")   ? webServer.arg("camHflip").toInt()   : 0;
+  cfg.camLenc     = webServer.hasArg("camLenc")    ? webServer.arg("camLenc").toInt()    : 0;
+  cfg.camDcw      = webServer.hasArg("camDcw")     ? webServer.arg("camDcw").toInt()     : 0;
 }
 
 // ============================================================
@@ -179,6 +179,7 @@ void handleTrigger() {
   udpTrigger.beginPacket(udpTrigger.remoteIP(), udpTrigger.remotePort());
   udpTrigger.write((const uint8_t*)ACK_MSG, strlen(ACK_MSG));
   udpTrigger.endPacket();
+  Serial.printf("[Trigger] ACK sent to %s\n", udpTrigger.remoteIP().toString().c_str());
 }
 
 // ============================================================
