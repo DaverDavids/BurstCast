@@ -261,7 +261,7 @@ String buildConfigPage(bool camOk) {
   // saveCfg: serialize entire form and POST to /save
   "function saveCfg(){"
   "  var d=new URLSearchParams(new FormData(document.getElementById('cfg')));"
-  "  fetch('/save',{method:'POST',body:d})"
+  "  fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
   "  .then(function(r){return r.json();})"
   "  .then(function(j){alert(j.ok?'Saved!':'Save failed');});"
   "}"
@@ -269,7 +269,7 @@ String buildConfigPage(bool camOk) {
   "function applyNow(){"
   "  var btn=document.getElementById('applyNowBtn');"
   "  var d=new URLSearchParams(new FormData(document.getElementById('cfg')));"
-  "  fetch('/sensorapply',{method:'POST',body:d})"
+  "  fetch('/sensorapply',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
   "  .then(function(r){return r.json();})"
   "  .then(function(j){"
   "    btn.textContent=j.ok?'\u2713 Applied!':'\u2717 Failed';"
