@@ -80,13 +80,13 @@ inline bool applySensorSettings() {
   if (!cfg.camAec) s->set_aec_value(s, cfg.camAecVal);
   s->set_gain_ctrl(s,   cfg.camGain);
   if (!cfg.camGain) s->set_agc_gain(s, cfg.camGainCtrl);
-  s->set_whitebal(s,    cfg.camAwb);
+  // set_whitebal omitted — unsafe at runtime, corrupts OV color matrix
   s->set_awb_gain(s,    cfg.camAwbGain);
   s->set_wb_mode(s,     cfg.camWbMode);
   s->set_vflip(s,       cfg.camVflip);
   s->set_hmirror(s,     cfg.camHflip);
   s->set_lenc(s,        cfg.camLenc);
-  s->set_dcw(s,         cfg.camDcw);
+  // set_dcw omitted — only takes effect at init, causes lockup at runtime
   Serial.println("[Camera] Sensor settings applied");
   return true;
 }
