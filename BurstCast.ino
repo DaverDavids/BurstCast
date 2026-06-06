@@ -32,6 +32,10 @@ static uint32_t recordStartMs = 0;
 static uint32_t showUntilMs   = 0;
 static bool     obsHideArmed  = false;
 
+// Captive-portal background WiFi retry
+static uint32_t lastWifiRetryMs = 0;
+static const uint32_t WIFI_RETRY_INTERVAL_MS = 30000; // retry every 30 s
+
 // ============================================================
 //  Preferences
 // ============================================================
@@ -144,8 +148,6 @@ void handleObsHide() {
 }
 
 // Parse sensor fields from POST body into cfg.
-// Uses toInt() on the explicit string value — works correctly with the
-// hidden-input-fallback pattern (always receives '0' or '1').
 static void parseSensorArgs() {
   if (webServer.hasArg("camBright"))   cfg.camBrightness = webServer.arg("camBright").toInt();
   if (webServer.hasArg("camContrast")) cfg.camContrast   = webServer.arg("camContrast").toInt();
@@ -187,13 +189,26 @@ void handleTrigger() {
 // ============================================================
 void startCaptivePortal() {
   captivePortalMode = true;
+  // Fully tear down STA before bringing up AP to avoid mixed-mode
+  // state that causes the every-other-boot connection failure.
+  WiFi.disconnect(true);
+  delay(100);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID);
   dnsServer.start(53, "*", WiFi.softAPIP());
+  lastWifiRetryMs = millis(); // schedule first retry immediately after interval
   Serial.printf("[WiFi] Captive portal: %s\n", WiFi.softAPIP().toString().c_str());
 }
 
 void connectWiFi() {
+  // FIX: Reset radio state fully before each connection attempt.
+  // Without this the ESP32 WiFi stack can retain dirty state from the
+  // previous session, causing it to silently skip the association on
+  // every other cold boot.
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+
   WiFi.setHostname(HOSTNAME);
   WiFi.mode(WIFI_STA);
   WiFi.begin(MYSSIDIOT, MYPSKIOT);
@@ -209,6 +224,58 @@ void connectWiFi() {
   } else {
     Serial.println("[WiFi] Failed — captive portal");
     startCaptivePortal();
+  }
+}
+
+// Called from loop() while in captive portal mode.
+// Periodically tries to connect to the compiled-in credentials so the
+// device recovers automatically if the AP comes back up.
+void handleCaptivePortalRetry() {
+  if (!captivePortalMode) return;
+  if (millis() - lastWifiRetryMs < WIFI_RETRY_INTERVAL_MS) return;
+  lastWifiRetryMs = millis();
+
+  Serial.println("[WiFi] Captive portal retry...");
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+
+  WiFi.setHostname(HOSTNAME);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(MYSSIDIOT, MYPSKIOT);
+
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
+    delay(250);
+    webServer.handleClient(); // keep web server alive during retry
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    captivePortalMode = false;
+    WiFi.setTxPower(WIFI_TX_POWER);
+    Serial.printf("[WiFi] Reconnected: %s\n", WiFi.localIP().toString().c_str());
+
+    // Bring up all normal-mode services that were skipped at boot
+    MDNS.begin(HOSTNAME);
+    MDNS.addService("http", "tcp", 80);
+    ArduinoOTA.setHostname(HOSTNAME);
+    ArduinoOTA.begin();
+    udpTrigger.begin(cfg.triggerPort);
+    obsWsBegin();
+    if (!cameraInit()) Serial.println("[BurstCast] Camera FAILED");
+    rtspBegin(camWidth, camHeight);
+    Serial.printf("[BurstCast] Ready — rtsp://%s:554/mjpeg/1\n", WiFi.localIP().toString().c_str());
+  } else {
+    // Back to AP — restart DNS
+    Serial.println("[WiFi] Retry failed, staying in captive portal");
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID);
+    dnsServer.start(53, "*", WiFi.softAPIP());
   }
 }
 
@@ -327,14 +394,26 @@ void setupWebServer() {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  // FIX: Longer settle time so the ESP32-S3 USB-CDC bootloader
+  // detection window closes cleanly before we start touching
+  // peripherals. 500 ms was too short after a fresh flash; 1500 ms
+  // is reliable across cold-boot and OTA-reboot paths.
+  delay(1500);
   Serial.println("\n[BurstCast] Boot");
   loadConfig();
   connectWiFi();
   if (!captivePortalMode) {
     MDNS.begin(HOSTNAME);
     MDNS.addService("http", "tcp", 80);
+    // FIX: Register OTA handlers BEFORE ArduinoOTA.begin() so a
+    // spurious OTA trigger right after flash cannot reboot into
+    // download mode with no handlers installed.
     ArduinoOTA.setHostname(HOSTNAME);
+    ArduinoOTA.onStart([]()  { Serial.println("[OTA] Start");  });
+    ArduinoOTA.onEnd([]()    { Serial.println("[OTA] End");    });
+    ArduinoOTA.onError([](ota_error_t e) {
+      Serial.printf("[OTA] Error[%u]\n", e);
+    });
     ArduinoOTA.begin();
     udpTrigger.begin(cfg.triggerPort);
     obsWsBegin();
@@ -346,7 +425,10 @@ void setup() {
 }
 
 void loop() {
-  if (captivePortalMode) { dnsServer.processNextRequest(); }
+  if (captivePortalMode) {
+    dnsServer.processNextRequest();
+    handleCaptivePortalRetry(); // keep trying to reach the AP
+  }
   webServer.handleClient();
   if (!captivePortalMode) {
     ArduinoOTA.handle();
@@ -358,7 +440,12 @@ void loop() {
     static uint32_t lastWifi = 0;
     if (millis() - lastWifi > 10000) {
       lastWifi = millis();
-      if (WiFi.status() != WL_CONNECTED) WiFi.reconnect();
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WiFi] Lost connection, reconnecting...");
+        WiFi.disconnect(true);
+        delay(100);
+        WiFi.begin(MYSSIDIOT, MYPSKIOT);
+      }
     }
   }
 }
