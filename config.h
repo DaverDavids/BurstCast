@@ -6,7 +6,7 @@
 
 #define HOSTNAME          "burstcast"
 #define AP_SSID           "BurstCast-Setup"
-#define WIFI_TIMEOUT_MS   10000
+#define WIFI_TIMEOUT_MS   20000
 #define WIFI_TX_POWER     WIFI_POWER_11dBm
 #define ACK_MSG           "OK"
 
